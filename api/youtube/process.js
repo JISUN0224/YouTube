@@ -1096,39 +1096,44 @@ async function formatTranscriptResult(azureResult, youtubeUrl) {
         console.log('🔧 구두점이 이미 충분함, 건너뜀');
       }
     }
-    // 단어 타임스탬프를 이용해 문장 경계(구두점) 우선으로 분할하고, 과도한 길이는 되돌려 자르기
+    // Azure 단어 시간 정보를 활용한 자연스러운 문장 단위 분할
     let formattedSegments = [];
-    console.log('🎯 세그먼트 분할 시작 - 단어 수:', words.length);
+    console.log('🎯 자연스러운 문장 단위 분할 시작 - 단어 수:', words.length);
     if (words.length > 0) {
-      const MAX_SEGMENT_SEC = 30; // 12초 → 30초로 증가
-      const LONG_PAUSE_SEC = 0.8;
-      const ROLLBACK_WINDOW_SEC = 2.0;
+      const MAX_SEGMENT_SEC = 60; // 최대 60초
+      const MIN_SEGMENT_SEC = 3; // 최소 3초
+      const SILENCE_THRESHOLD = 0.8; // 침묵 구간 임계값 (0.8초)
+      const MAX_SILENCE_GAP = 2.0; // 최대 허용 침묵 구간
 
       const isPunct = (ch) => /[。！？]/.test(ch);
       const stripPunct = (s) => (s || '').replace(/[。！？\s]/g, '');
 
-      // 1) 마침표 기준으로만 분할 (DisplayText 사용)
-      const sentences = (displayText || '')
-        .split(/(?<=[。！？])/)
-        .map(s => s.trim())
-        .filter(Boolean);
-      console.log('🧩 문장 수:', sentences.length);
-      console.log('📝 분할된 문장들:', sentences.map((s, i) => `${i + 1}: "${s.slice(0, 30)}..."`).join('\n'));
-
-      // 2) 단어 인덱스와 문장 문자 수를 맞춰 매핑
-      let wordIndex = 0;
+      // 1) 침묵 구간과 의미 단위를 기반으로 한 자연스러운 분할
       let segmentId = 1;
+      let currentSegment = {
+        startIdx: 0,
+        startTime: 0,
+        text: '',
+        words: []
+      };
 
       const getWordStartSec = (idx) => ((words[idx]?.Offset || 0) / 10_000_000);
       const getWordEndSec = (idx) => (((words[idx]?.Offset || 0) + (words[idx]?.Duration || 0)) / 10_000_000);
+      const getWordGap = (idx1, idx2) => Math.max(0, getWordStartSec(idx2) - getWordEndSec(idx1));
 
-      const TAIL_TRIM_SEC = 0.15; // 세그먼트 테일 트림 150ms
-      const pushSegmentByRange = (startIdx, endIdx, textForSegment) => {
-        if (startIdx > endIdx || startIdx < 0 || endIdx >= words.length) return;
-        const startSec = getWordStartSec(startIdx);
-        let endSec = getWordEndSec(endIdx);
-        // 테일 트림(최소 길이 보장)
-        endSec = Math.max(startSec, endSec - TAIL_TRIM_SEC);
+      // 세그먼트 추가 함수
+      const addSegment = (endIdx) => {
+        if (currentSegment.startIdx > endIdx || currentSegment.words.length === 0) return;
+        
+        const startSec = currentSegment.startTime;
+        const endSec = getWordEndSec(endIdx);
+        const duration = endSec - startSec;
+        
+        // 최소 길이 보장
+        if (duration < MIN_SEGMENT_SEC) return;
+        
+        const segmentText = currentSegment.words.map(w => w.Word || '').join('');
+        
         formattedSegments.push({
           id: segmentId++,
           seek: 0,
@@ -1136,106 +1141,93 @@ async function formatTranscriptResult(azureResult, youtubeUrl) {
           end: endSec,
           start_time: formatSecondsToTimeString(startSec),
           end_time: formatSecondsToTimeString(endSec),
-          text: textForSegment,
-          original_text: textForSegment,
+          text: segmentText,
+          original_text: segmentText,
           tokens: [],
           temperature: 0.0,
           avg_logprob: typeof nbest?.Confidence === 'number' ? nbest.Confidence : 0.9,
           compression_ratio: 1.0,
           no_speech_prob: 0.1,
           keywords: [],
-          words: words.slice(startIdx, endIdx + 1).map(w => ({
+          words: currentSegment.words.map(w => ({
             word: w.Word || '',
             start: (w.Offset || 0) / 10_000_000,
             end: ((w.Offset || 0) + (w.Duration || 0)) / 10_000_000,
             probability: typeof w.Confidence === 'number' ? w.Confidence : 0.9,
-          })),
+          }))
         });
+        
+        console.log(`📝 세그먼트 ${segmentId-1} 추가: [${startSec.toFixed(1)}s-${endSec.toFixed(1)}s] "${segmentText.slice(0, 30)}..."`);
       };
 
-      // 긴 문장을 되돌려 자르기 (단어 구간 내에서 긴 쉬는 구간으로 split)
-      const splitLongByPauses = (startIdx, endIdx) => {
-        const localSegments = [];
-        let curStart = startIdx;
-        for (let i = startIdx + 1; i <= endIdx; i++) {
-          const prevEnd = getWordEndSec(i - 1);
-          const curStartSec = getWordStartSec(i);
-          const gap = Math.max(0, curStartSec - prevEnd);
-          const curDur = getWordEndSec(i) - getWordStartSec(curStart);
-          if (curDur >= MAX_SEGMENT_SEC) {
-            // ROLLBACK_WINDOW 내 최적 split 찾기
-            let bestSplit = -1;
-            let bestGap = 0;
-            for (let j = i - 1; j > curStart; j--) {
-              const js = getWordStartSec(j);
-              const curEndSec = getWordEndSec(i - 1);
-              if (curEndSec - js > ROLLBACK_WINDOW_SEC) break;
-              const gp = Math.max(0, getWordStartSec(j) - getWordEndSec(j - 1));
-              if (gp >= LONG_PAUSE_SEC && gp > bestGap) {
-                bestGap = gp; bestSplit = j;
-              }
-            }
-            if (bestSplit === -1) {
-              // 롤백 내 긴 쉬는 구간이 없으면 현재 i-1에서 자르기
-              bestSplit = i - 1;
-            }
-            localSegments.push([curStart, bestSplit]);
-            curStart = bestSplit + 1;
-          }
+      // 새로운 세그먼트 시작
+      const startNewSegment = (idx) => {
+        if (currentSegment.words.length > 0) {
+          addSegment(idx - 1);
         }
-        if (curStart <= endIdx) localSegments.push([curStart, endIdx]);
-        return localSegments;
+        currentSegment = {
+          startIdx: idx,
+          startTime: getWordStartSec(idx),
+          text: '',
+          words: []
+        };
       };
 
-      for (let sentIdx = 0; sentIdx < sentences.length; sentIdx++) {
-        const sent = sentences[sentIdx];
-        const plain = stripPunct(sent);
-        if (!plain) continue;
+      // 2) 단어들을 순회하면서 자연스러운 분할점 찾기
+      console.log('🔄 단어별 분석 시작...');
+      
+      for (let i = 0; i < words.length; i++) {
+        const word = words[i];
+        const currentTime = getWordStartSec(i);
+        const currentDuration = getWordEndSec(i) - getWordStartSec(i);
         
-        console.log(`\n🔗 문장 ${sentIdx + 1} 매핑 시작: "${sent.slice(0, 40)}..."`);
-        console.log(`   - 제거된 마침표 텍스트: "${plain.slice(0, 40)}..."`);
-        console.log(`   - 목표 문자 수: ${plain.length}`);
-        console.log(`   - 시작 단어 인덱스: ${wordIndex}`);
-        
-        const targetChars = plain.length;
-        let consumed = 0;
-        const startIdx = wordIndex;
-        while (wordIndex < words.length && consumed < targetChars) {
-          const w = words[wordIndex];
-          const inc = stripPunct(w.Word || '').length || 1;
-          consumed += inc;
-          wordIndex += 1;
+        // 첫 번째 단어인 경우 세그먼트 시작
+        if (i === 0) {
+          currentSegment.startTime = currentTime;
         }
-        const endIdx = Math.max(startIdx, wordIndex - 1);
         
-        console.log(`   - 종료 단어 인덱스: ${endIdx}`);
-        console.log(`   - 소비된 문자 수: ${consumed}/${targetChars}`);
-        console.log(`   - 매핑된 단어들: ${words.slice(startIdx, endIdx + 1).map(w => w.Word || '').join('')}`);
+        // 현재 단어를 세그먼트에 추가
+        currentSegment.words.push(word);
         
-        if (startIdx > endIdx) {
-          console.log(`   - ⚠️ 매핑 실패: startIdx(${startIdx}) > endIdx(${endIdx})`);
-          continue;
-        }
-
-        const dur = getWordEndSec(endIdx) - getWordStartSec(startIdx);
-        console.log(`   - 세그먼트 길이: ${dur.toFixed(2)}초 (최대: ${MAX_SEGMENT_SEC}초)`);
-        
-        if (dur > MAX_SEGMENT_SEC) {
-          console.log(`   - 🔄 길이 초과로 분할 시도`);
-          // 길이 제한 초과 → 되돌려 자르기
-          const parts = splitLongByPauses(startIdx, endIdx);
-          console.log(`   - 분할 결과: ${parts.length}개 부분`);
-          // 부분 텍스트는 단어 결합(추가 구두점 삽입 없음)
-          for (const [s, e] of parts) {
-            const subText = words.slice(s, e + 1).map(w => w.Word || '').join('');
-            console.log(`     - 부분 세그먼트: [${s}-${e}] "${subText.slice(0, 30)}..."`);
-            pushSegmentByRange(s, e, subText);
+        // 다음 단어와의 간격 확인
+        if (i < words.length - 1) {
+          const gap = getWordGap(i, i + 1);
+          const segmentDuration = getWordEndSec(i) - currentSegment.startTime;
+          
+          // 분할 조건 확인
+          let shouldSplit = false;
+          let splitReason = '';
+          
+          // 1. 침묵 구간이 충분히 긴 경우 (0.8초 이상)
+          if (gap >= SILENCE_THRESHOLD) {
+            shouldSplit = true;
+            splitReason = `침묵 구간 (${gap.toFixed(1)}초)`;
           }
-        } else {
-          console.log(`   - ✅ 정상 길이, 원문 사용`);
-          // 원문 문장 텍스트 그대로 사용 (구두점 포함)
-          pushSegmentByRange(startIdx, endIdx, sent);
+          // 2. 세그먼트가 너무 긴 경우 (60초 이상)
+          else if (segmentDuration >= MAX_SEGMENT_SEC) {
+            shouldSplit = true;
+            splitReason = `길이 제한 (${segmentDuration.toFixed(1)}초)`;
+          }
+          // 3. 의미 단위 확인 (특정 키워드 뒤에서 분할)
+          else {
+            const wordText = word.Word || '';
+            const meaningBreaks = ['。', '！', '？', '报道称', '表示', '称', '说', '认为', '指出', '强调', '宣布', '决定'];
+            if (meaningBreaks.some(breakWord => wordText.includes(breakWord))) {
+              shouldSplit = true;
+              splitReason = `의미 단위 (${wordText})`;
+            }
+          }
+          
+          if (shouldSplit) {
+            console.log(`🔪 분할점 발견 [${i}]: ${splitReason}`);
+            startNewSegment(i + 1);
+          }
         }
+      }
+      
+      // 마지막 세그먼트 처리
+      if (currentSegment.words.length > 0) {
+        addSegment(words.length - 1);
       }
 
       console.log('✅ 세그먼트 분할 완료, 총 세그먼트 수:', formattedSegments.length);
