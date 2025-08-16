@@ -149,11 +149,28 @@ const ProcessingPage: React.FC = () => {
             <div className="bg-gray-50 rounded-xl p-6 mb-6">
               <div className="grid grid-cols-2 gap-4 text-center">
                 <div>
-                  <div className="text-2xl font-bold text-blue-600">{result.stats?.total_segments || 0}</div>
+                  <div className="text-2xl font-bold text-blue-600">{result.segments?.length || 0}</div>
                   <div className="text-sm text-gray-600">세그먼트</div>
                 </div>
                 <div>
-                  <div className="text-2xl font-bold text-green-600">{result.stats?.total_duration || '0:00'}</div>
+                  <div className="text-2xl font-bold text-green-600">
+                    {result.segments && result.segments.length > 0 
+                      ? (() => {
+                          const lastSegment = result.segments[result.segments.length - 1];
+                          const totalSecondsNum = typeof lastSegment?.end === 'number' ? Math.floor(lastSegment.end) : NaN;
+                          if (Number.isFinite(totalSecondsNum)) {
+                            const hours = Math.floor(totalSecondsNum / 3600);
+                            const minutes = Math.floor((totalSecondsNum % 3600) / 60);
+                            const seconds = totalSecondsNum % 60;
+                            return hours > 0 
+                              ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+                              : `${minutes}:${String(seconds).padStart(2, '0')}`;
+                          }
+                          return '0:00';
+                        })()
+                      : '0:00'
+                    }
+                  </div>
                   <div className="text-sm text-gray-600">총 길이</div>
                 </div>
               </div>
@@ -228,7 +245,6 @@ const ProcessingPage: React.FC = () => {
         <div className="text-center">
           <div className="inline-flex items-center bg-blue-50 text-blue-700 px-4 py-2 rounded-lg text-sm font-medium">
             <span className="mr-2">🐍</span>
-            Python 서버에서 FFmpeg + Whisper로 무료 처리 중
           </div>
           <div className="mt-4">
             <button onClick={() => navigate('/youtube-generator')} className="text-gray-500 hover:text-gray-700 text-sm px-4 py-2 rounded transition-colors">

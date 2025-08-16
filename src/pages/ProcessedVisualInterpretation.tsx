@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { extractVideoId } from '../utils/youtube.validation'
-import { auth, db } from '../firebase'
-import { doc, setDoc } from 'firebase/firestore'
+import { auth } from '../firebase'
+// import { db } from '../firebase'  // Firestore 사용 시 활성화
+// import { doc, setDoc } from 'firebase/firestore'  // Firestore 사용 시 활성화
 import { VideoHistoryService } from '../services/videoHistoryService'
 
 declare global {
@@ -95,6 +96,8 @@ const ProcessedVisualInterpretation: React.FC = () => {
   // YouTube
   const [youtubeVideoId, setYoutubeVideoId] = useState('')
   const [isDataLoaded, setIsDataLoaded] = useState(false)
+  // 전역 싱크 오프셋(초). 양수 = 자막을 늦춤, 음수 = 자막을 앞당김
+  const [syncOffset, setSyncOffset] = useState<number>(0)
   
   // 즐겨찾기 상태
   const [isFavorite, setIsFavorite] = useState(false)
@@ -121,6 +124,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
         const processedData: ProcessedData = JSON.parse(processingResultStr)
         if (processedData.video_info) setVideoInfo(processedData.video_info)
         if (processedData.segments && Array.isArray(processedData.segments)) {
+          // console.log('🔍 Loaded segments:', processedData.segments.slice(0, 3));
           setSegments(processedData.segments)
         }
         const originalUrl = localStorage.getItem('currentYouTubeUrl') || ''
@@ -144,6 +148,11 @@ const ProcessedVisualInterpretation: React.FC = () => {
     loadProcessedData()
   }, [navigate])
 
+  // 영상 변경 시 오프셋 리셋 (새로고침/전환 시 0으로)
+  useEffect(() => {
+    setSyncOffset(0)
+  }, [youtubeVideoId])
+
   // 즐겨찾기 토글 핸들러
   const handleToggleFavorite = () => {
     if (!currentVideoUrl) return
@@ -158,6 +167,96 @@ const ProcessedVisualInterpretation: React.FC = () => {
     }
   }
 
+  const formatSecondsToTimeString = (seconds: number): string => {
+    const hours = Math.floor(seconds / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+    const secs = Math.floor(seconds % 60)
+    const milliseconds = Math.floor((seconds % 1) * 1000)
+    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')},${milliseconds.toString().padStart(3, '0')}`
+  }
+
+  const handleAddToRecommended = async () => {
+    try {
+      const raw = localStorage.getItem('processingResult')
+      if (!raw) {
+        alert('처리 결과가 없습니다.')
+        return
+      }
+      const data = JSON.parse(raw)
+      const url = currentVideoUrl || localStorage.getItem('currentYouTubeUrl') || ''
+      const vid = extractVideoId(url || '') || youtubeVideoId
+      const thumb = vid ? `https://img.youtube.com/vi/${vid}/mqdefault.jpg` : ''
+
+      const lastEnd = segments.length > 0 ? (segments[segments.length - 1].end_seconds ?? timeToSeconds(segments[segments.length - 1].end_time || segments[segments.length - 1].end)) : 0
+      const durationStr = (() => {
+        const totalSeconds = Math.floor(lastEnd || 0)
+        const h = Math.floor(totalSeconds / 3600)
+        const m = Math.floor((totalSeconds % 3600) / 60)
+        const s = totalSeconds % 60
+        return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`
+      })()
+
+      const recommendedSegments = segments.map((seg, idx) => {
+        const startNum = seg.start_seconds ?? timeToSeconds(seg.start_time)
+        const endNum = seg.end_seconds ?? timeToSeconds(seg.end_time)
+        return {
+          id: seg.id ?? idx + 1,
+          seek: startNum || 0,
+          start: startNum || 0,
+          end: endNum || 0,
+          start_time: seg.start_time || formatSecondsToTimeString(startNum || 0),
+          end_time: seg.end_time || formatSecondsToTimeString(endNum || 0),
+          text: seg.original_text || '',
+          original_text: seg.original_text || '',
+        }
+      })
+
+      const snippetObj = {
+        id: String(Date.now()),
+        title: data?.video_info?.title || '추천 항목',
+        channel: data?.video_info?.speaker || 'YouTube',
+        duration: durationStr,
+        views: '',
+        uploadTime: '',
+        thumbnail: thumb,
+        url,
+        description: data?.video_info?.description || '',
+        verified: true,
+        processedData: {
+          text: (data?.full_text || data?.text) ?? recommendedSegments.map((s: any) => s.text).join(' '),
+          segments: recommendedSegments,
+          language: data?.language || data?.video_info?.language || 'zh-CN',
+          processed_at: new Date().toISOString(),
+        }
+      }
+
+      // 로컬 보관(선택): 사용자 커스텀 추천 리스트
+      try {
+        const existing = JSON.parse(localStorage.getItem('recommended_custom') || '[]')
+        localStorage.setItem('recommended_custom', JSON.stringify([snippetObj, ...existing]))
+      } catch {}
+
+      // 코드 스니펫 클립보드 복사(하드코딩 리스트에 붙여넣기 용)
+      const code = `{
+  id: "${snippetObj.id}",
+  title: ${JSON.stringify(snippetObj.title)},
+  channel: ${JSON.stringify(snippetObj.channel)},
+  duration: ${JSON.stringify(snippetObj.duration)},
+  views: "",
+  uploadTime: "",
+  thumbnail: ${JSON.stringify(snippetObj.thumbnail)},
+  url: ${JSON.stringify(snippetObj.url)},
+  description: ${JSON.stringify(snippetObj.description)},
+  verified: true,
+  processedData: ${JSON.stringify(snippetObj.processedData, null, 2)}
+}`
+      await navigator.clipboard.writeText(code)
+      alert('✅ 추천 스니펫을 클립보드에 복사했어요. recommendedVideos.ts 배열에 붙여넣고 저장하면 홈에 노출됩니다.')
+    } catch (e) {
+      alert('추천 추가 준비 중 오류가 발생했습니다.')
+    }
+  }
+
   const timeToSeconds = (timeStr: string | number): number => {
     // 숫자인 경우 바로 반환
     if (typeof timeStr === 'number') {
@@ -166,27 +265,59 @@ const ProcessedVisualInterpretation: React.FC = () => {
     
     // 문자열이 아니거나 undefined인 경우 0 반환
     if (!timeStr || typeof timeStr !== 'string') {
+    // console.warn('timeToSeconds: Invalid timeStr:', timeStr);
       return 0;
     }
     
-    // HH:MM:SS,mmm 형식 파싱
+    // console.log('timeToSeconds: Parsing timeStr:', timeStr);
+    
     const parts = timeStr.split(':')
-    if (parts.length !== 3) {
-      return 0;
+    
+    // MM:SS 형식 (예: "4:19")
+    if (parts.length === 2) {
+      const minutes = parseInt(parts[0], 10) || 0
+      
+              // 쉼표 또는 점으로 초와 밀리초 분리
+        const secondsParts = parts[1].includes(',') ? parts[1].split(',') : parts[1].split('.')
+        const seconds = parseInt(secondsParts[0], 10) || 0
+        const milliseconds = secondsParts[1] ? parseInt(secondsParts[1].padEnd(3, '0'), 10) / 1000 : 0
+      
+      const result = minutes * 60 + seconds + milliseconds
+      // console.log('timeToSeconds: Result (MM:SS):', result, 'for', timeStr);
+      return result
     }
     
-    const hours = parseInt(parts[0], 10) || 0
-    const minutes = parseInt(parts[1], 10) || 0
-    const secondsParts = parts[2].split(',')
-    const seconds = parseInt(secondsParts[0], 10) || 0
-    const milliseconds = secondsParts[1] ? parseInt(secondsParts[1], 10) / 1000 : 0
-    return hours * 3600 + minutes * 60 + seconds + milliseconds
+    // HH:MM:SS 형식 (예: "00:04:19,000")
+    if (parts.length === 3) {
+      const hours = parseInt(parts[0], 10) || 0
+      const minutes = parseInt(parts[1], 10) || 0
+      
+              // 쉼표 또는 점으로 초와 밀리초 분리
+        const secondsParts = parts[2].includes(',') ? parts[2].split(',') : parts[2].split('.')
+        const seconds = parseInt(secondsParts[0], 10) || 0
+        const milliseconds = secondsParts[1] ? parseInt(secondsParts[1].padEnd(3, '0'), 10) / 1000 : 0
+      
+      const result = hours * 3600 + minutes * 60 + seconds + milliseconds
+      // console.log('timeToSeconds: Result (HH:MM:SS):', result, 'for', timeStr);
+      return result
+    }
+    
+    // console.warn('timeToSeconds: Invalid format, expected MM:SS or HH:MM:SS', timeStr);
+    return 0;
+  }
+
+  // 오프셋 적용 시간 계산
+  const getTimeWithOffset = (time: string | number): number => {
+    const base = timeToSeconds(time)
+    const adjusted = base + syncOffset
+    return adjusted < 0 ? 0 : adjusted
   }
 
   const findCurrentSegmentIndex = (currentTimeInSeconds: number): number => {
     for (let i = 0; i < segments.length; i++) {
-      const startTime = timeToSeconds(segments[i].start_time)
-      const endTime = timeToSeconds(segments[i].end_time)
+      // start_time/end_time 필드가 있으면 사용, 없으면 start/end 필드 사용 + 오프셋 적용
+      const startTime = getTimeWithOffset(segments[i].start_time || segments[i].start)
+      const endTime = getTimeWithOffset(segments[i].end_time || segments[i].end)
       if (currentTimeInSeconds >= startTime && currentTimeInSeconds <= endTime) {
         return i
       }
@@ -284,41 +415,42 @@ const ProcessedVisualInterpretation: React.FC = () => {
   useEffect(() => {
     if (!player || !segments.length) return
     const interval = window.setInterval(() => {
-      if (player.getCurrentTime) {
-        const time = player.getCurrentTime()
-        setCurrentTime(time)
-        const segmentIndex = findCurrentSegmentIndex(time)
-        if (segmentIndex !== -1 && segmentIndex !== currentScript) {
-          setCurrentScript(segmentIndex)
-        }
+      if (!player.getCurrentTime) return
+      const time = player.getCurrentTime()
+      setCurrentTime(time)
 
-        if (
-          pauseMode !== 'manual' &&
-          practiceMode === 'listen' &&
-          autoDetectionEnabled &&
-          currentScript < segments.length &&
-          isPlaying &&
-          !isRecording
-        ) {
-          const currentSegment = segments[currentScript]
-          const endTime = timeToSeconds(currentSegment.end_time)
-          const startTime = timeToSeconds(currentSegment.start_time)
-          if (time >= endTime && time - startTime >= 1) {
-            const since = Date.now() - lastAutoDetectionEnabledTime
-            if (since > 1000) {
-              if (pauseMode === 'segment') {
+      // 최신 인덱스를 즉시 사용하여 상태 비동기 갭으로 인한 오프바이원 방지
+      const computedIndex = findCurrentSegmentIndex(time)
+      const activeIndex = computedIndex !== -1 ? computedIndex : currentScript
+      if (computedIndex !== -1 && computedIndex !== currentScript) {
+        setCurrentScript(computedIndex)
+      }
+
+      if (
+        pauseMode !== 'manual' &&
+        practiceMode === 'listen' &&
+        autoDetectionEnabled &&
+        activeIndex < segments.length &&
+        isPlaying &&
+        !isRecording
+      ) {
+        const seg = segments[activeIndex]
+        const endTime = getTimeWithOffset(seg.end_time || seg.end)
+        if (time >= endTime) {
+          const since = Date.now() - lastAutoDetectionEnabledTime
+          if (since > 1000) {
+            if (pauseMode === 'segment') {
+              player.pauseVideo()
+              if (isAutoMode) {
+                setPracticeSegmentIndex(activeIndex)
+                setPracticeMode('interpret')
+              }
+            } else if (pauseMode === 'sentence') {
+              if (seg && isCompleteSentence(seg.original_text || seg.text)) {
                 player.pauseVideo()
                 if (isAutoMode) {
-                  setPracticeSegmentIndex(currentScript)
+                  setPracticeSegmentIndex(activeIndex)
                   setPracticeMode('interpret')
-                }
-              } else if (pauseMode === 'sentence') {
-                if (currentSegment && isCompleteSentence(currentSegment.original_text || currentSegment.text)) {
-                  player.pauseVideo()
-                  if (isAutoMode) {
-                    setPracticeSegmentIndex(currentScript)
-                    setPracticeMode('interpret')
-                  }
                 }
               }
             }
@@ -329,11 +461,25 @@ const ProcessedVisualInterpretation: React.FC = () => {
     return () => window.clearInterval(interval)
   }, [player, segments, currentScript, isPlaying, pauseMode, isRecording, isAutoMode, practiceMode, autoDetectionEnabled, lastAutoDetectionEnabledTime])
 
-  // 자막 스크립트 자동 스크롤
+  // 자막 스크립트 자동 스크롤 (컨테이너 내부만 스크롤, 상단 정렬)
   useEffect(() => {
-    if (scriptContainerRef.current && segments.length > 0) {
-      const currentElement = scriptContainerRef.current.children[currentScript] as HTMLElement
-      if (currentElement) currentElement.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const container = scriptContainerRef.current
+    if (!container || segments.length === 0) return
+    if (currentScript < 0 || currentScript >= segments.length) return
+
+    const currentElement = container.children[currentScript] as HTMLElement | undefined
+    if (!currentElement) return
+
+    // 현재 요소가 컨테이너 가시 영역 밖이면, 요소가 상단에 오도록 컨테이너만 스크롤
+    const containerRect = container.getBoundingClientRect()
+    const elRect = currentElement.getBoundingClientRect()
+    const padding = 8
+    const isAbove = elRect.top < containerRect.top + padding
+    const isBelow = elRect.bottom > containerRect.bottom - padding
+    if (isAbove || isBelow) {
+      const offset = currentElement.offsetTop - container.offsetTop
+      const targetTop = Math.max(0, offset - padding)
+      container.scrollTo({ top: targetTop, behavior: 'smooth' })
     }
   }, [currentScript, segments.length])
 
@@ -448,11 +594,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {/* 홈으로 버튼 */}
-      <button onClick={() => navigate('/')} className="absolute top-4 left-4 z-50 px-4 py-2 bg-white hover:bg-gray-100 text-gray-800 rounded-lg shadow-md transition-colors duration-200 flex items-center space-x-2">
-        <span>🏠</span>
-        <span>홈으로</span>
-      </button>
+      
 
       <div className="min-h-screen bg-gray-50 p-5">
         <div className="max-w-7xl mx-auto">
@@ -558,7 +700,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
                 <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 mb-6">
                   <h4 className="text-lg font-semibold text-blue-800 mb-4 flex items-center gap-2"><span>🔊</span> 원문 듣기 단계</h4>
                   <div className="flex justify-center mb-4">
-                    <button onClick={() => { if (player && segments[currentScript]) { const s = timeToSeconds(segments[currentScript].start_time); player.seekTo(s); player.playVideo(); setLastAutoDetectionEnabledTime(Date.now()) } }} disabled={!player || segments.length === 0} className={`w-24 h-24 rounded-full text-4xl font-bold transition-all duration-300 shadow-lg flex items-center justify-center ${!player || segments.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : isPlaying ? 'bg-orange-500 text-white hover:bg-orange-600 animate-pulse' : 'bg-blue-500 text-white hover:bg-blue-600 hover:scale-105'}`} style={{ lineHeight: '1' }}>{isPlaying ? '⏸️' : '▶️'}</button>
+                    <button onClick={() => { if (player && segments[currentScript]) { const s = getTimeWithOffset(segments[currentScript].start_time || segments[currentScript].start); player.seekTo(s); player.playVideo(); setLastAutoDetectionEnabledTime(Date.now()) } }} disabled={!player || segments.length === 0} className={`w-24 h-24 rounded-full text-4xl font-bold transition-all duration-300 shadow-lg flex items-center justify-center ${!player || segments.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : isPlaying ? 'bg-orange-500 text-white hover:bg-orange-600 animate-pulse' : 'bg-blue-500 text-white hover:bg-blue-600 hover:scale-105'}`} style={{ lineHeight: '1' }}>{isPlaying ? '⏸️' : '▶️'}</button>
                   </div>
                   <div className="text-center">
                     <div className="text-gray-600 mb-2">{isPlaying ? '재생 중...' : '현재 세그먼트 재생'}</div>
@@ -587,7 +729,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
                     )}
                   </div>
                   <div className="flex gap-3 mt-4">
-                    <button onClick={() => { if (player && segments[practiceSegmentIndex]) { const s = timeToSeconds(segments[practiceSegmentIndex].start_time); player.seekTo(s); player.playVideo() } }} className="flex-1 py-3 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">🔁 다시 듣기</button>
+                    <button onClick={() => { if (player && segments[practiceSegmentIndex]) { const s = getTimeWithOffset(segments[practiceSegmentIndex].start_time || segments[practiceSegmentIndex].start); player.seekTo(s); player.playVideo() } }} className="flex-1 py-3 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">🔁 다시 듣기</button>
                     {(accumulatedText.trim() || currentText.trim()) && (
                       <button onClick={() => { setAccumulatedText(''); setCurrentText(''); setRecordingTime(0) }} className="py-3 px-4 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors">🗑️ 초기화</button>
                     )}
@@ -628,7 +770,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
                   )}
                   <div className="flex gap-3">
                     <button onClick={() => { setPracticeMode('listen'); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0) }} className="flex-1 py-3 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">🔁 다시 연습</button>
-                    <button onClick={() => { if (practiceSegmentIndex < segments.length - 1) { const nextIndex = practiceSegmentIndex + 1; setPracticeSegmentIndex(nextIndex); setCurrentScript(nextIndex); setPracticeMode('listen'); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); if (!completedSegments.includes(practiceSegmentIndex)) { setCompletedSegments((prev) => [...prev, practiceSegmentIndex]); const segmentScore = Math.min(accumulatedText.trim().length * 2, 100); setTotalScore((prev) => prev + segmentScore) } setAutoDetectionEnabled(false); if (player) { const start = timeToSeconds(segments[nextIndex].start_time); player.seekTo(start); player.playVideo(); setTimeout(() => setAutoDetectionEnabled(true), 1000) } else { setTimeout(() => setAutoDetectionEnabled(true), 500) } } }} disabled={practiceSegmentIndex >= segments.length - 1} className={`flex-1 py-3 px-4 rounded-lg transition-colors ${practiceSegmentIndex >= segments.length - 1 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-500 text-white hover:bg-green-600'}`}>➡️ 다음 세그먼트</button>
+                    <button onClick={() => { if (practiceSegmentIndex < segments.length - 1) { const nextIndex = practiceSegmentIndex + 1; setPracticeSegmentIndex(nextIndex); setCurrentScript(nextIndex); setPracticeMode('listen'); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); if (!completedSegments.includes(practiceSegmentIndex)) { setCompletedSegments((prev) => [...prev, practiceSegmentIndex]); const segmentScore = Math.min(accumulatedText.trim().length * 2, 100); setTotalScore((prev) => prev + segmentScore) } setAutoDetectionEnabled(false); if (player) { const start = getTimeWithOffset(segments[nextIndex].start_time || segments[nextIndex].start); player.seekTo(start); player.playVideo(); setTimeout(() => setAutoDetectionEnabled(true), 1000) } else { setTimeout(() => setAutoDetectionEnabled(true), 500) } } }} disabled={practiceSegmentIndex >= segments.length - 1} className={`flex-1 py-3 px-4 rounded-lg transition-colors ${practiceSegmentIndex >= segments.length - 1 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-500 text-white hover:bg-green-600'}`}>➡️ 다음 세그먼트</button>
                   </div>
                 </div>
               )}
@@ -639,8 +781,8 @@ const ProcessedVisualInterpretation: React.FC = () => {
                   <h4 className="text-sm font-semibold text-gray-700 mb-3">수동 제어</h4>
                   <div className="flex gap-3">
                     <button onClick={() => { if (player) { if (isPlaying) player.pauseVideo(); else player.playVideo() } }} disabled={!player} className={`px-4 py-2 rounded-lg font-medium transition-colors ${!player ? 'bg-gray-400 text-gray-600 cursor-not-allowed' : 'bg-green-500 text-white hover:bg-green-600'}`}>{isPlaying ? '⏸️ 일시정지' : '▶️ 재생'}</button>
-                    <button onClick={() => { if (player && segments.length > 0) { setPracticeMode('listen'); setPracticeSegmentIndex(0); setCurrentScript(0); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); setAutoDetectionEnabled(false); const startTime = timeToSeconds(segments[0].start_time); player.seekTo(startTime); setTimeout(() => setAutoDetectionEnabled(true), 1000) } }} disabled={!player} className={`px-4 py-2 rounded-lg font-medium transition-colors ${!player ? 'bg-gray-400 text-gray-600 cursor-not-allowed' : 'bg-yellow-500 text-white hover:bg-yellow-600'}`}>🔄 처음부터</button>
-                    <button onClick={() => { if (player && currentScript < segments.length) { setPracticeMode('listen'); setPracticeSegmentIndex(currentScript); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); setAutoDetectionEnabled(false); const startTime = timeToSeconds(segments[currentScript].start_time); player.seekTo(startTime); player.playVideo(); setTimeout(() => setAutoDetectionEnabled(true), 1000) } }} disabled={!player || segments.length === 0} className={`px-4 py-2 rounded-lg font-medium transition-colors ${!player || segments.length === 0 ? 'bg-gray-400 text-gray-600 cursor-not-allowed' : 'bg-blue-500 text-white hover:bg-blue-600'}`}>🎯 현재 세그먼트</button>
+                    <button onClick={() => { if (player && segments.length > 0) { setPracticeMode('listen'); setPracticeSegmentIndex(0); setCurrentScript(0); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); setAutoDetectionEnabled(false); const startTime = getTimeWithOffset(segments[0].start_time || segments[0].start); player.seekTo(startTime); setTimeout(() => setAutoDetectionEnabled(true), 1000) } }} disabled={!player} className={`px-4 py-2 rounded-lg font-medium transition-colors ${!player ? 'bg-gray-400 text-gray-600 cursor-not-allowed' : 'bg-yellow-500 text-white hover:bg-yellow-600'}`}>🔄 처음부터</button>
+                    <button onClick={() => { if (player && currentScript < segments.length) { setPracticeMode('listen'); setPracticeSegmentIndex(currentScript); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); setAutoDetectionEnabled(false); const startTime = getTimeWithOffset(segments[currentScript].start_time || segments[currentScript].start); player.seekTo(startTime); player.playVideo(); setTimeout(() => setAutoDetectionEnabled(true), 1000) } }} disabled={!player || segments.length === 0} className={`px-4 py-2 rounded-lg font-medium transition-colors ${!player || segments.length === 0 ? 'bg-gray-400 text-gray-600 cursor-not-allowed' : 'bg-blue-500 text-white hover:bg-blue-600'}`}>🎯 현재 세그먼트</button>
                   </div>
                 </div>
               )}
@@ -651,7 +793,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
               {/* 통역 설정 */}
               <div className="mb-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">⚙️ 통역 설정</h3>
-                <div className="space-y-4">
+              <div className="space-y-4">
                   <div>
                     <label className="block text-gray-700 font-medium mb-1">재생 속도</label>
                     <select className="w-full p-2 border-2 border-gray-300 rounded-md" defaultValue={1} onChange={(e) => { try { player?.setPlaybackRate?.(Number(e.target.value)) } catch {} }}>
@@ -661,6 +803,22 @@ const ProcessedVisualInterpretation: React.FC = () => {
                       <option value={1.2}>빠름 (1.2x)</option>
                     </select>
                   </div>
+                <div>
+                  <label className="block text-gray-700 font-medium mb-1">싱크 오프셋 (자막 vs 영상)</label>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setSyncOffset((v) => Math.max(-10, Number((v - 0.5).toFixed(3))))} className="px-3 py-2 bg-gray-200 hover:bg-gray-300 rounded">-0.5s</button>
+                    <button onClick={() => setSyncOffset(0)} className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded">Reset</button>
+                    <button onClick={() => setSyncOffset((v) => Math.min(10, Number((v + 0.5).toFixed(3))))} className="px-3 py-2 bg-gray-200 hover:bg-gray-300 rounded">+0.5s</button>
+                    <div className="ml-2 text-sm text-gray-700">현재: {syncOffset >= 0 ? `+${syncOffset.toFixed(3)}` : syncOffset.toFixed(3)}s</div>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-1">양수면 자막이 늦어지고, 음수면 자막이 앞당겨집니다. (영상별로 저장됨)</div>
+                </div>
+                </div>
+
+                {/* 추천에 올리기 */}
+                <div className="pt-4 border-t">
+                  <button onClick={handleAddToRecommended} className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg">📌 추천에 올리기</button>
+                  <p className="text-xs text-gray-500 mt-2">클릭 시 현재 처리 결과를 추천 스니펫으로 변환해 클립보드에 복사합니다. `src/data/recommendedVideos.ts` 배열에 붙여넣고 저장하세요.</p>
                 </div>
               </div>
 
@@ -678,10 +836,10 @@ const ProcessedVisualInterpretation: React.FC = () => {
               {/* 자막 스크립트 */}
               <div>
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">📝 자막 스크립트</h3>
-                <div ref={scriptContainerRef} className="h-[28rem] overflow-y-auto border-2 border-gray-300 rounded-lg p-4 bg-gray-50">
+                <div ref={scriptContainerRef} className="h-[28rem] overflow-y-auto border-2 border-gray-300 rounded-lg p-4 bg-gray-50 overscroll-contain">
                   {segments.map((segment, index) => (
-                    <div key={segment.id} onClick={() => { setPracticeMode('listen'); setPracticeSegmentIndex(index); setCurrentScript(index); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); if (player) { const startTime = timeToSeconds(segment.start_time); setLastAutoDetectionEnabledTime(Date.now()); player.seekTo(startTime); player.playVideo() } }} className={`p-3 mb-2 rounded cursor-pointer transition-all ${currentScript === index ? 'bg-blue-100 border-l-4 border-blue-500 shadow-md scale-105' : 'hover:bg-gray-200'}`}>
-                      <div className="text-gray-600 text-xs mb-1">[{segment.start_time} - {segment.end_time}]</div>
+                    <div key={segment.id} onClick={() => { setPracticeMode('listen'); setPracticeSegmentIndex(index); setCurrentScript(index); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); if (player) { const startTime = getTimeWithOffset(segment.start_time || segment.start); setLastAutoDetectionEnabledTime(Date.now()); player.seekTo(startTime); player.playVideo() } }} className={`p-3 mb-2 rounded cursor-pointer transition-all ${currentScript === index ? 'bg-blue-100 border-l-4 border-blue-500 shadow-md scale-105' : 'hover:bg-gray-200'}`}>
+                      <div className="text-gray-600 text-xs mb-1">[{segment.start_time || `${Math.floor((segment.start || 0) / 60)}:${((segment.start || 0) % 60).toFixed(0).padStart(2, '0')}`} - {segment.end_time || `${Math.floor((segment.end || 0) / 60)}:${((segment.end || 0) % 60).toFixed(0).padStart(2, '0')}`}]</div>
                       <div className="text-gray-900 font-medium text-sm">{segment.original_text}</div>
                       {segment.keywords && segment.keywords.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">

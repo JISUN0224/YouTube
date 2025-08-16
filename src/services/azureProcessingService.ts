@@ -140,7 +140,7 @@ export function useAzureProcessing() {
     }
   }, [])
 
-  const startProcessing = useCallback(async (url: string) => {
+  const startProcessing = useCallback(async (url: string, previewSeconds?: number) => {
     log('startProcessing 호출됨, URL:', url)
     if (!url) {
       err('URL이 없습니다')
@@ -161,11 +161,11 @@ export function useAzureProcessing() {
     loggingDisabledRef.current = false
 
     try {
-      log(`${BASE_URL}/api/youtube/process로 요청 전송`, { url })
+      log(`${BASE_URL}/api/youtube/process로 요청 전송`, { url, previewSeconds })
       const res = await fetch(`${BASE_URL}/api/youtube/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, previewSeconds }),
       })
       log('서버 응답 받음:', { status: res.status, statusText: res.statusText })
       
@@ -201,7 +201,17 @@ export function useAzureProcessing() {
     return () => clearPolling()
   }, [])
 
-  return { isProcessing, progress, currentStep, message, result, error, startProcessing }
+  const checkCaptions = useCallback(async (url: string): Promise<{ hasCaptions: boolean }> => {
+    const res = await fetch(`${BASE_URL}/api/youtube/check`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    })
+    if (!res.ok) throw new Error('자막 확인 실패')
+    return res.json()
+  }, [])
+
+  return { isProcessing, progress, currentStep, message, result, error, startProcessing, checkCaptions }
 }
 
 
