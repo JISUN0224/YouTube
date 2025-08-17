@@ -395,6 +395,13 @@ export default function YouTubeGenerator() {
                 </div>
               </div>
               
+              <div className="mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                <p className="text-xs text-gray-700">
+                  ✅ <span className="text-green-600 font-medium">즉시 재생</span> = 별도 과정 없이 클릭만 하면 통역 연습 가능해요<br/>
+                  💡 일반 영상 = URL 입력 후 스크립트 추출 등 과정이 필요해요
+                </p>
+              </div>
+              
               <div className="space-y-2 max-h-[80vh] overflow-y-auto">
                                   {recommendedVideos.map((video) => (
                     <RecommendedVideoCard
@@ -448,13 +455,6 @@ export default function YouTubeGenerator() {
                       }}
                     />
                   ))}
-              </div>
-              
-              <div className="mt-4 pt-4 border-t border-gray-200 text-center">
-                <p className="text-xs text-gray-600">
-                  ✅ <span className="text-green-600 font-medium">즉시 재생</span> = 별도 과정 없이 클릭만 하면 통역 연습 가능해요<br/>
-                  💡 일반 영상 = URL 입력 후 스크립트 추출 등 과정이 필요해요요
-                </p>
               </div>
             </div>
           </div>
