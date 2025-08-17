@@ -175,12 +175,22 @@ const ProcessingPage: React.FC = () => {
                 </div>
               </div>
             </div>
-            <button
-              onClick={() => navigate('/visual-interpretation')}
-              className="w-full bg-green-500 text-white px-8 py-3 rounded-lg text-lg font-semibold hover:bg-green-600 transition-colors shadow-lg"
-            >
-              🎯 통역 연습 시작하기
-            </button>
+            <div className="space-y-3">
+              <button
+                onClick={() => navigate('/visual-interpretation')}
+                className="w-full bg-green-500 text-white px-8 py-3 rounded-lg text-lg font-semibold hover:bg-green-600 transition-colors shadow-lg"
+              >
+                🎯 통역 연습 시작하기
+              </button>
+              
+              {/* 🔥 새로운 기능: AI 평가받기 버튼 */}
+              <button
+                onClick={() => navigate('/visual-interpretation')}
+                className="w-full bg-purple-500 text-white px-8 py-3 rounded-lg text-lg font-semibold hover:bg-purple-600 transition-colors shadow-lg"
+              >
+                🤖 AI 평가받기
+              </button>
+            </div>
             <div className="mt-4 text-sm text-gray-500">잠시 후 자동으로 이동됩니다...</div>
           </div>
         </div>
@@ -244,7 +254,6 @@ const ProcessingPage: React.FC = () => {
         </div>
         <div className="text-center">
           <div className="inline-flex items-center bg-blue-50 text-blue-700 px-4 py-2 rounded-lg text-sm font-medium">
-            <span className="mr-2">🐍</span>
           </div>
           <div className="mt-4">
             <button onClick={() => navigate('/youtube-generator')} className="text-gray-500 hover:text-gray-700 text-sm px-4 py-2 rounded transition-colors">

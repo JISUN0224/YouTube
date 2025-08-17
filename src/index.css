@@ -14,6 +14,37 @@ html, body, #root {
   height: 100%;
 }
 
+/* 중국어 폰트 통일 */
+* {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+/* 중국어 텍스트 특별 처리 */
+.chinese-text {
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'SimHei', 'SimSun', sans-serif;
+  font-weight: 400;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+}
+
+/* 스크립트 텍스트 전용 스타일 */
+.script-text {
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'SimHei', 'SimSun', sans-serif;
+  font-size: 16px;
+  line-height: 1.8;
+  font-weight: 400;
+  color: #333;
+}
+
+/* 세그먼트 텍스트 스타일 */
+.segment-text {
+  font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'SimHei', 'SimSun', sans-serif;
+  font-size: 15px;
+  line-height: 1.7;
+  font-weight: 400;
+  color: #2c3e50;
+}
+
 
 
 @keyframes fadeIn {

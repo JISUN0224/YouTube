@@ -42,7 +42,7 @@ export function RecommendedVideoCard({ video, onClick }: RecommendedVideoCardPro
       {/* 비디오 정보 */}
       <div className="flex-1 min-w-0">
         {/* 제목 */}
-        <h3 className="font-medium text-[15px] leading-snug text-gray-900 line-clamp-2 group-hover:text-blue-600 transition-colors">
+        <h3 className="font-medium text-[15px] leading-snug text-gray-900 line-clamp-2 group-hover:text-blue-600 transition-colors chinese-text">
           {video.title}
         </h3>
         

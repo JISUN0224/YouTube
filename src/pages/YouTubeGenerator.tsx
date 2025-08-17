@@ -301,10 +301,7 @@ export default function YouTubeGenerator() {
                 </div>
               </div>
 
-              <div className="bg-gray-50 rounded-lg p-4">
-                <h3 className="font-semibold text-gray-700 mb-2"> 예시 URL</h3>
-                <code className="text-sm text-gray-600 bg-white px-2 py-1 rounded">https://www.youtube.com/watch?v=example</code>
-              </div>
+
             </form>
 
             {verified && (
@@ -497,7 +494,7 @@ export default function YouTubeGenerator() {
                       
                       {/* 정보 */}
                       <div className="flex-1 ml-4 min-w-0">
-                        <div className="font-medium text-gray-900 truncate group-hover:text-blue-700">
+                        <div className="font-medium text-gray-900 truncate group-hover:text-blue-700 chinese-text">
                           {item.title}
                         </div>
                         <div className="text-sm text-gray-500 truncate mt-1">

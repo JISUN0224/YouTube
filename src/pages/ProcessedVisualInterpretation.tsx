@@ -86,6 +86,15 @@ const ProcessedVisualInterpretation: React.FC = () => {
   // 세션 관리
   const [completedSegments, setCompletedSegments] = useState<number[]>([])
   const [totalScore, setTotalScore] = useState(0)
+  
+  // 별점 평가 결과 state 추가
+  const [evaluationResult, setEvaluationResult] = useState<{
+    accuracy: { stars: number, comment: string }     // 정확도 (1-5별점 + 한줄평)
+    completeness: { stars: number, comment: string } // 완성도 (1-5별점 + 한줄평)
+    fluency: { stars: number, comment: string }      // 자연스러움 (1-5별점 + 한줄평)
+    overall: number  // 전체 점수 (1-10점)
+  } | null>(null);
+  const [isEvaluating, setIsEvaluating] = useState(false);
 
   // 음성 재생 관련 상태
   const [isPlayingUserAudio, setIsPlayingUserAudio] = useState(false)
@@ -313,25 +322,129 @@ const ProcessedVisualInterpretation: React.FC = () => {
     return adjusted < 0 ? 0 : adjusted
   }
 
+  // 현재 재생 시간 기반으로 현재 세그먼트 찾기
   const findCurrentSegmentIndex = (currentTimeInSeconds: number): number => {
     for (let i = 0; i < segments.length; i++) {
-      // start_time/end_time 필드가 있으면 사용, 없으면 start/end 필드 사용 + 오프셋 적용
-      const startTime = getTimeWithOffset(segments[i].start_time || segments[i].start)
-      const endTime = getTimeWithOffset(segments[i].end_time || segments[i].end)
+      const startTime = timeToSeconds(segments[i].start_time);
+      const endTime = timeToSeconds(segments[i].end_time);
+      
       if (currentTimeInSeconds >= startTime && currentTimeInSeconds <= endTime) {
-        return i
+        return i;
       }
     }
-    return -1
+    return -1;
+  };
+
+  // 문장이 완전한지 확인하는 함수 (중국어 문장 부호로 판단)
+  const isCompleteSentence = (text: string): boolean => {
+    const chineseEndPunctuations = ['。', '！', '？', '；'];
+    return chineseEndPunctuations.some(punct => text.trim().endsWith(punct));
+  };
+
+  // 별점 표시 컴포넌트
+  const StarRating: React.FC<{ stars: number, maxStars?: number }> = ({ stars, maxStars = 5 }) => {
+    // stars 값을 확실히 숫자로 변환
+    const numericStars = Number(stars) || 0
+    console.log('🔍 StarRating 디버그:', { stars, numericStars, maxStars, type: typeof stars })
+    return (
+      <div className="flex gap-1">
+        {Array.from({ length: maxStars }, (_, i) => (
+          <span key={i} className={`text-lg ${i < numericStars ? 'text-yellow-400' : 'text-gray-300'}`}>
+            ⭐
+          </span>
+        ))}
+      </div>
+    )
   }
 
-  const isCompleteSentence = (text: string | undefined): boolean => {
-    if (!text || typeof text !== 'string') {
-      return false;
+  // 별점 기반 Gemini API 호출 함수
+  const evaluateTranslationWithStars = async (originalText: string, userTranslation: string) => {
+    const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY
+    
+    if (!GEMINI_API_KEY) {
+      console.warn('Gemini API 키가 설정되지 않았습니다')
+      return null
     }
-    const chineseEndPunctuations = ['。', '！', '？', '；']
-    return chineseEndPunctuations.some((punct) => text.trim().endsWith(punct))
+
+    if (!userTranslation.trim()) {
+      return null
+    }
+
+    setIsEvaluating(true)
+
+    try {
+      const prompt = `다음 중국어를 한국어로 통역한 결과를 평가해주세요.
+
+원문: ${originalText}
+통역: ${userTranslation}
+
+다음 3가지 항목을 1-5점 별점으로 평가하고 각각 1-2문장 피드백을 주세요:
+
+**평가 기준:**
+1. **정확도 (accuracy)**: 원문의 의미를 정확히 번역했는지 평가
+2. **완성도 (completeness)**: 원문의 모든 내용이 번역에 포함되었는지 평가  
+3. **자연스러움 (fluency)**: 원문의 맥락과 의미를 고려했을 때 한국어로 자연스럽게 표현되었는지 평가
+   - 원문과 전혀 관련없는 내용이면 1점
+   - 단어 자체가 자연스러워도 맥락이 맞지 않으면 낮은 점수
+
+JSON 형식으로만 응답:
+{
+  "accuracy": {
+    "stars": 1-5점,
+    "comment": "정확도 피드백(1-2문장)"
+  },
+  "completeness": {
+    "stars": 1-5점, 
+    "comment": "완성도 피드백(1-2문장)"
+  },
+  "fluency": {
+    "stars": 1-5점,
+    "comment": "자연스러움 피드백(1-2문장)"
+  },
+  "overall": 1-10점
+}`
+
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{ text: prompt }]
+          }],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: 800,
+          }
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error(`Gemini API 오류: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      
+      // JSON 추출
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        const evaluation = JSON.parse(jsonMatch[0])
+        return evaluation
+      } else {
+        throw new Error('유효한 JSON 응답을 받지 못했습니다')
+      }
+
+    } catch (error) {
+      console.error('Gemini 평가 실패:', error)
+      return null
+    } finally {
+      setIsEvaluating(false)
+    }
   }
+
+
 
   // YouTube API 로드
   useEffect(() => {
@@ -411,55 +524,58 @@ const ProcessedVisualInterpretation: React.FC = () => {
     }
   }, [isDataLoaded, youtubeVideoId])
 
-  // 비디오 시간 추적 및 자동 일시정지
+    // 비디오 시간 추적
   useEffect(() => {
-    if (!player || !segments.length) return
-    const interval = window.setInterval(() => {
-      if (!player.getCurrentTime) return
-      const time = player.getCurrentTime()
-      setCurrentTime(time)
+    if (!player || !segments.length) return;
 
-      // 최신 인덱스를 즉시 사용하여 상태 비동기 갭으로 인한 오프바이원 방지
-      const computedIndex = findCurrentSegmentIndex(time)
-      const activeIndex = computedIndex !== -1 ? computedIndex : currentScript
-      if (computedIndex !== -1 && computedIndex !== currentScript) {
-        setCurrentScript(computedIndex)
-      }
-
-      if (
-        pauseMode !== 'manual' &&
-        practiceMode === 'listen' &&
-        autoDetectionEnabled &&
-        activeIndex < segments.length &&
-        isPlaying &&
-        !isRecording
-      ) {
-        const seg = segments[activeIndex]
-        const endTime = getTimeWithOffset(seg.end_time || seg.end)
-        if (time >= endTime) {
-          const since = Date.now() - lastAutoDetectionEnabledTime
-          if (since > 1000) {
-            if (pauseMode === 'segment') {
-              player.pauseVideo()
-              if (isAutoMode) {
-                setPracticeSegmentIndex(activeIndex)
-                setPracticeMode('interpret')
-              }
-            } else if (pauseMode === 'sentence') {
-              if (seg && isCompleteSentence(seg.original_text || seg.text)) {
-                player.pauseVideo()
+    const interval = setInterval(() => {
+      if (player.getCurrentTime) {
+        const time = player.getCurrentTime();
+        setCurrentTime(time);
+        
+        const segmentIndex = findCurrentSegmentIndex(time);
+        if (segmentIndex !== -1 && segmentIndex !== currentScript) {
+          setCurrentScript(segmentIndex);
+        }
+        
+        // 일시정지 모드에 따라 처리 (듣기 모드일 때만, 자동 감지가 활성화된 경우에만)
+        if (pauseMode !== 'manual' && practiceMode === 'listen' && autoDetectionEnabled && currentScript < segments.length && isPlaying && !isRecording) {
+          const currentSegment = segments[currentScript];
+          const endTime = timeToSeconds(currentSegment.end_time);
+          const startTime = timeToSeconds(currentSegment.start_time);
+          
+          // 세그먼트의 시작 후 최소 1초는 지났는지 확인
+          if (time >= endTime && time - startTime >= 1) {
+            // 자동 감지가 방금 활성화된 경우는 일시정지하지 않음
+            const timeSinceAutoDetectionEnabled = Date.now() - lastAutoDetectionEnabledTime;
+            if (timeSinceAutoDetectionEnabled > 1000) {
+              if (pauseMode === 'segment') {
+                player.pauseVideo();
+                console.log(`세그먼트 ${currentScript + 1} 종료 - 자동 일시정지`);
+                
                 if (isAutoMode) {
-                  setPracticeSegmentIndex(activeIndex)
-                  setPracticeMode('interpret')
+                  setPracticeSegmentIndex(currentScript);
+                  setPracticeMode('interpret');
+                }
+              } else if (pauseMode === 'sentence') {
+                if (isCompleteSentence(currentSegment.original_text)) {
+                  player.pauseVideo();
+                  console.log(`완전한 문장 종료 (세그먼트 ${currentScript + 1}) - 자동 일시정지`);
+                  
+                  if (isAutoMode) {
+                    setPracticeSegmentIndex(currentScript);
+                    setPracticeMode('interpret');
+                  }
                 }
               }
             }
           }
         }
       }
-    }, 100)
-    return () => window.clearInterval(interval)
-  }, [player, segments, currentScript, isPlaying, pauseMode, isRecording, isAutoMode, practiceMode, autoDetectionEnabled, lastAutoDetectionEnabledTime])
+    }, 100);
+
+    return () => clearInterval(interval);
+  }, [player, segments, currentScript, isPlaying, pauseMode, isRecording, isAutoMode, practiceMode, autoDetectionEnabled, lastAutoDetectionEnabledTime]);
 
   // 자막 스크립트 자동 스크롤 (컨테이너 내부만 스크롤, 상단 정렬)
   useEffect(() => {
@@ -671,7 +787,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
                 </button>
                 {segments.length > 0 && currentScript < segments.length ? (
                   !hideOriginalText ? (
-                    <div className="text-lg mb-2 text-yellow-300">{segments[currentScript].original_text}</div>
+                    <div className="text-lg mb-2 text-yellow-300 script-text">{segments[currentScript].original_text}</div>
                   ) : (
                     <div className="text-gray-400 italic text-sm">원문이 숨겨져 있습니다</div>
                   )
@@ -730,10 +846,119 @@ const ProcessedVisualInterpretation: React.FC = () => {
                   </div>
                   <div className="flex gap-3 mt-4">
                     <button onClick={() => { if (player && segments[practiceSegmentIndex]) { const s = getTimeWithOffset(segments[practiceSegmentIndex].start_time || segments[practiceSegmentIndex].start); player.seekTo(s); player.playVideo() } }} className="flex-1 py-3 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">🔁 다시 듣기</button>
+                    
+                    {/* 🔥 새로운 기능: AI 평가받기 버튼 */}
                     {(accumulatedText.trim() || currentText.trim()) && (
-                      <button onClick={() => { setAccumulatedText(''); setCurrentText(''); setRecordingTime(0) }} className="py-3 px-4 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors">🗑️ 초기화</button>
+                      <button 
+                        onClick={async () => {
+                          if (segments[practiceSegmentIndex]) {
+                            const originalText = segments[practiceSegmentIndex].original_text || ''
+                            const userTranslation = accumulatedText.trim() + ' ' + currentText.trim()
+                            const evaluation = await evaluateTranslationWithStars(originalText, userTranslation.trim())
+                            if (evaluation) {
+                              setEvaluationResult(evaluation)
+                              console.log('📊 통역 평가 완료:', evaluation)
+                            }
+                          }
+                        }}
+                        className="flex-1 py-3 px-4 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors"
+                      >
+                        🤖 AI 평가받기
+                      </button>
+                    )}
+
+                    {(accumulatedText.trim() || currentText.trim()) && (
+                      <button onClick={() => { setAccumulatedText(''); setCurrentText(''); setRecordingTime(0) }} className="flex-1 py-3 px-4 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition-colors">🗑️ 초기화</button>
                     )}
                   </div>
+
+                  {/* 🔥 통역 녹음 단계에서도 평가 결과 표시 */}
+                  {isEvaluating && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mt-4">
+                      <div className="flex items-center justify-center gap-2">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
+                        <span className="text-blue-700 text-sm font-medium">AI 평가 중...</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {evaluationResult && !isEvaluating && (
+                    <div className="bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 rounded-lg p-4 mt-4">
+                      {/* 전체 점수 */}
+                      <div className="flex items-center justify-between mb-4">
+                        <h5 className="font-semibold text-purple-700 flex items-center gap-2">
+                          🤖 AI 평가 결과
+                        </h5>
+                        <div className={`text-xl font-bold px-3 py-1 rounded-full ${
+                          evaluationResult.overall >= 8 ? 'bg-green-100 text-green-700' :
+                          evaluationResult.overall >= 6 ? 'bg-yellow-100 text-yellow-700' :
+                          'bg-red-100 text-red-700'
+                        }`}>
+                          {evaluationResult.overall}/10
+                        </div>
+                      </div>
+
+                      {/* 3가지 평가 항목 */}
+                      <div className="space-y-3">
+                        {/* 정확도 */}
+                        <div className="bg-white rounded-lg p-3 border border-red-100">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-medium text-red-700">📍 정확도</span>
+                            <div className="flex items-center gap-2">
+                              <StarRating stars={evaluationResult.accuracy.stars} />
+                              <span className="text-sm text-gray-600">({evaluationResult.accuracy.stars}/5)</span>
+                            </div>
+                          </div>
+                          <p className="text-sm text-gray-700">{evaluationResult.accuracy.comment}</p>
+                        </div>
+
+                        {/* 완성도 */}
+                        <div className="bg-white rounded-lg p-3 border border-green-100">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-medium text-green-700">✅ 완성도</span>
+                            <div className="flex items-center gap-2">
+                              <StarRating stars={evaluationResult.completeness.stars} />
+                              <span className="text-sm text-gray-600">({evaluationResult.completeness.stars}/5)</span>
+                            </div>
+                          </div>
+                          <p className="text-sm text-gray-700">{evaluationResult.completeness.comment}</p>
+                        </div>
+
+                        {/* 자연스러움 */}
+                        <div className="bg-white rounded-lg p-3 border border-blue-100">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-medium text-blue-700">💫 자연스러움</span>
+                            <div className="flex items-center gap-2">
+                              <StarRating stars={evaluationResult.fluency.stars} />
+                              <span className="text-sm text-gray-600">({evaluationResult.fluency.stars}/5)</span>
+                            </div>
+                          </div>
+                          <p className="text-sm text-gray-700">{evaluationResult.fluency.comment}</p>
+                        </div>
+                      </div>
+
+                      {/* 다시 평가받기 버튼 */}
+                      <div className="mt-4 text-center">
+                        <button
+                          onClick={async () => {
+                            setEvaluationResult(null)
+                            if (segments[practiceSegmentIndex]) {
+                              const originalText = segments[practiceSegmentIndex].original_text || ''
+                              const userTranslation = accumulatedText.trim() + ' ' + currentText.trim()
+                              const evaluation = await evaluateTranslationWithStars(originalText, userTranslation.trim())
+                              if (evaluation) {
+                                setEvaluationResult(evaluation)
+                                console.log('📊 통역 재평가 완료:', evaluation)
+                              }
+                            }
+                          }}
+                          className="px-4 py-2 bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200 transition-colors text-sm"
+                        >
+                          🔄 다시 평가받기
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -741,21 +966,139 @@ const ProcessedVisualInterpretation: React.FC = () => {
               {practiceMode === 'review' && (
                 <div className="bg-green-50 border border-green-200 rounded-xl p-6 mb-6">
                   <h4 className="text-lg font-semibold text-green-800 mb-4 flex items-center gap-2"><span>📝</span> 검토 단계</h4>
+                  
+                  {/* 내 통역 결과 */}
                   <div className="bg-white border border-green-200 rounded-lg p-4 mb-4">
                     <div className="flex justify-between items-center mb-2">
                       <h5 className="font-semibold text-green-700">내 통역 결과 (세그먼트 {practiceSegmentIndex + 1}):</h5>
                       <button onClick={() => setIsPlayingUserAudio(!isPlayingUserAudio)} disabled={!audioBlob} className={`px-3 py-1 rounded text-xs ${isPlayingUserAudio ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-green-100 text-green-600 hover:bg-green-200'}`}>{isPlayingUserAudio ? '⏸️ 일시정지' : '🔊 듣기'}</button>
                     </div>
-                    <p className="text-gray-800 leading-relaxed">{recordedSegments[practiceSegmentIndex] || accumulatedText || '녹음된 내용이 없습니다.'}</p>
-                    <div className="mt-2 text-xs text-gray-500 border-t pt-2">원문: {segments[practiceSegmentIndex]?.original_text || '원문 없음'}</div>
+                            <p className="text-gray-800 leading-relaxed mb-3">{recordedSegments[practiceSegmentIndex] || accumulatedText || '녹음된 내용이 없습니다.'}</p>
+        <div className="text-xs text-gray-500 border-t pt-2">원문: <span className="chinese-text">{segments[practiceSegmentIndex]?.original_text || '원문 없음'}</span></div>
                   </div>
+
+                  {/* 🔥 새로운 기능: AI 평가받기 버튼 */}
+                  {!evaluationResult && !isEvaluating && (
+                    <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-4">
+                      <div className="text-center">
+                        <h5 className="font-semibold text-purple-700 mb-3">🤖 AI 평가받기</h5>
+                        <p className="text-sm text-purple-600 mb-4">
+                          내 통역 결과를 AI가 평가해드립니다.<br/>
+                          정확도, 완성도, 자연스러움을 별점으로 평가받을 수 있어요!
+                        </p>
+                        <button
+                          onClick={async () => {
+                            const finalTranslation = recordedSegments[practiceSegmentIndex] || accumulatedText || ''
+                            if (finalTranslation.trim() && segments[practiceSegmentIndex]) {
+                              const originalText = segments[practiceSegmentIndex].original_text || ''
+                              const evaluation = await evaluateTranslationWithStars(originalText, finalTranslation.trim())
+                              if (evaluation) {
+                                setEvaluationResult(evaluation)
+                                console.log('📊 통역 평가 완료:', evaluation)
+                              }
+                            }
+                          }}
+                          disabled={!recordedSegments[practiceSegmentIndex] && !accumulatedText.trim()}
+                          className={`px-6 py-3 rounded-lg font-medium transition-all ${
+                            !recordedSegments[practiceSegmentIndex] && !accumulatedText.trim()
+                              ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                              : 'bg-purple-500 text-white hover:bg-purple-600 hover:scale-105'
+                          }`}
+                        >
+                          🎯 AI 평가받기
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 평가 진행 중 로딩 */}
+                  {isEvaluating && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                      <div className="flex items-center justify-center gap-2">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500"></div>
+                        <span className="text-blue-700 text-sm font-medium">AI 평가 중...</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 평가 결과 표시 */}
+                  {evaluationResult && !isEvaluating && (
+                    <div className="bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 rounded-lg p-4 mb-4">
+                      {/* 전체 점수 */}
+                      <div className="flex items-center justify-between mb-4">
+                        <h5 className="font-semibold text-purple-700 flex items-center gap-2">
+                          🤖 AI 평가 결과
+                        </h5>
+                        <div className={`text-xl font-bold px-3 py-1 rounded-full ${
+                          evaluationResult.overall >= 8 ? 'bg-green-100 text-green-700' :
+                          evaluationResult.overall >= 6 ? 'bg-yellow-100 text-yellow-700' :
+                          'bg-red-100 text-red-700'
+                        }`}>
+                          {evaluationResult.overall}/10
+                        </div>
+                      </div>
+
+                      {/* 3가지 평가 항목 */}
+                      <div className="space-y-3">
+                        {/* 정확도 */}
+                        <div className="bg-white rounded-lg p-3 border border-red-100">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-medium text-red-700">📍 정확도</span>
+                            <StarRating stars={evaluationResult.accuracy.stars} />
+                          </div>
+                          <p className="text-sm text-gray-700">{evaluationResult.accuracy.comment}</p>
+                        </div>
+
+                        {/* 완성도 */}
+                        <div className="bg-white rounded-lg p-3 border border-green-100">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-medium text-green-700">✅ 완성도</span>
+                            <StarRating stars={evaluationResult.completeness.stars} />
+                          </div>
+                          <p className="text-sm text-gray-700">{evaluationResult.completeness.comment}</p>
+                        </div>
+
+                        {/* 자연스러움 */}
+                        <div className="bg-white rounded-lg p-3 border border-blue-100">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="font-medium text-blue-700">💫 자연스러움</span>
+                            <StarRating stars={evaluationResult.fluency.stars} />
+                          </div>
+                          <p className="text-sm text-gray-700">{evaluationResult.fluency.comment}</p>
+                        </div>
+                      </div>
+
+                      {/* 다시 평가받기 버튼 */}
+                      <div className="mt-4 text-center">
+                        <button
+                          onClick={async () => {
+                            setEvaluationResult(null)
+                            const finalTranslation = recordedSegments[practiceSegmentIndex] || accumulatedText || ''
+                            if (finalTranslation.trim() && segments[practiceSegmentIndex]) {
+                              const originalText = segments[practiceSegmentIndex].original_text || ''
+                              const evaluation = await evaluateTranslationWithStars(originalText, finalTranslation.trim())
+                              if (evaluation) {
+                                setEvaluationResult(evaluation)
+                                console.log('📊 통역 재평가 완료:', evaluation)
+                              }
+                            }
+                          }}
+                          className="px-4 py-2 bg-purple-100 text-purple-700 rounded-lg hover:bg-purple-200 transition-colors text-sm"
+                        >
+                          🔄 다시 평가받기
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* AI 제안 답안 */}
                   {segments[practiceSegmentIndex] && (
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
                       <div className="flex justify-between items-center mb-2">
                         <h5 className="font-semibold text-blue-700">AI 제안 답안 (세그먼트 {practiceSegmentIndex + 1}):</h5>
                         <button onClick={() => { setIsPlayingModelAudio(!isPlayingModelAudio); if (!isPlayingModelAudio) speakKorean(segments[practiceSegmentIndex].translation_suggestion) }} className={`px-3 py-1 rounded text-xs ${isPlayingModelAudio ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}>{isPlayingModelAudio ? '⏸️ 일시정지' : '🔊 듣기'}</button>
                       </div>
-                      <p className="text-gray-800 leading-relaxed mb-3">{segments[practiceSegmentIndex].translation_suggestion}</p>
+                      <p className="text-gray-800 leading-relaxed mb-3 script-text">{segments[practiceSegmentIndex].translation_suggestion}</p>
                       {!!segments[practiceSegmentIndex].keywords?.length && (
                         <div className="mb-3">
                           <div className="text-sm font-medium text-blue-700 mb-2">🔑 핵심 키워드:</div>
@@ -768,9 +1111,44 @@ const ProcessedVisualInterpretation: React.FC = () => {
                       )}
                     </div>
                   )}
+                  
+                  {/* 액션 버튼들 */}
                   <div className="flex gap-3">
-                    <button onClick={() => { setPracticeMode('listen'); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0) }} className="flex-1 py-3 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">🔁 다시 연습</button>
-                    <button onClick={() => { if (practiceSegmentIndex < segments.length - 1) { const nextIndex = practiceSegmentIndex + 1; setPracticeSegmentIndex(nextIndex); setCurrentScript(nextIndex); setPracticeMode('listen'); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); if (!completedSegments.includes(practiceSegmentIndex)) { setCompletedSegments((prev) => [...prev, practiceSegmentIndex]); const segmentScore = Math.min(accumulatedText.trim().length * 2, 100); setTotalScore((prev) => prev + segmentScore) } setAutoDetectionEnabled(false); if (player) { const start = getTimeWithOffset(segments[nextIndex].start_time || segments[nextIndex].start); player.seekTo(start); player.playVideo(); setTimeout(() => setAutoDetectionEnabled(true), 1000) } else { setTimeout(() => setAutoDetectionEnabled(true), 500) } } }} disabled={practiceSegmentIndex >= segments.length - 1} className={`flex-1 py-3 px-4 rounded-lg transition-colors ${practiceSegmentIndex >= segments.length - 1 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-500 text-white hover:bg-green-600'}`}>➡️ 다음 세그먼트</button>
+                    <button onClick={() => { 
+                      setPracticeMode('listen'); 
+                      setAccumulatedText(''); 
+                      setCurrentText(''); 
+                      setRecordingTime(0);
+                      setEvaluationResult(null); // 🔥 평가 결과 초기화
+                    }} className="flex-1 py-3 px-4 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">🔁 다시 연습</button>
+                    <button onClick={() => { 
+                      if (practiceSegmentIndex < segments.length - 1) { 
+                        const nextIndex = practiceSegmentIndex + 1; 
+                        setPracticeSegmentIndex(nextIndex); 
+                        setCurrentScript(nextIndex); 
+                        setPracticeMode('listen'); 
+                        setAccumulatedText(''); 
+                        setCurrentText(''); 
+                        setRecordingTime(0);
+                        setEvaluationResult(null); // 🔥 평가 결과 초기화
+                        
+                        if (!completedSegments.includes(practiceSegmentIndex)) { 
+                          setCompletedSegments((prev) => [...prev, practiceSegmentIndex]); 
+                          const segmentScore = Math.min(accumulatedText.trim().length * 2, 100); 
+                          setTotalScore((prev) => prev + segmentScore) 
+                        } 
+                        
+                        setAutoDetectionEnabled(false); 
+                        if (player) { 
+                          const start = getTimeWithOffset(segments[nextIndex].start_time || segments[nextIndex].start); 
+                          player.seekTo(start); 
+                          player.playVideo(); 
+                          setTimeout(() => setAutoDetectionEnabled(true), 1000) 
+                        } else { 
+                          setTimeout(() => setAutoDetectionEnabled(true), 500) 
+                        } 
+                      } 
+                    }} disabled={practiceSegmentIndex >= segments.length - 1} className={`flex-1 py-3 px-4 rounded-lg transition-colors ${practiceSegmentIndex >= segments.length - 1 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-500 text-white hover:bg-green-600'}`}>➡️ 다음 세그먼트</button>
                   </div>
                 </div>
               )}
@@ -840,7 +1218,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
                   {segments.map((segment, index) => (
                     <div key={segment.id} onClick={() => { setPracticeMode('listen'); setPracticeSegmentIndex(index); setCurrentScript(index); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); if (player) { const startTime = getTimeWithOffset(segment.start_time || segment.start); setLastAutoDetectionEnabledTime(Date.now()); player.seekTo(startTime); player.playVideo() } }} className={`p-3 mb-2 rounded cursor-pointer transition-all ${currentScript === index ? 'bg-blue-100 border-l-4 border-blue-500 shadow-md scale-105' : 'hover:bg-gray-200'}`}>
                       <div className="text-gray-600 text-xs mb-1">[{segment.start_time || `${Math.floor((segment.start || 0) / 60)}:${((segment.start || 0) % 60).toFixed(0).padStart(2, '0')}`} - {segment.end_time || `${Math.floor((segment.end || 0) / 60)}:${((segment.end || 0) % 60).toFixed(0).padStart(2, '0')}`}]</div>
-                      <div className="text-gray-900 font-medium text-sm">{segment.original_text}</div>
+                      <div className="text-gray-900 font-medium text-sm segment-text">{segment.original_text}</div>
                       {segment.keywords && segment.keywords.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">
                           {segment.keywords.slice(0, 3).map((keyword, kIndex) => (

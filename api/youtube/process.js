@@ -7,11 +7,211 @@ import fetch from 'node-fetch';
 
 // Azure Speech Services 설정
 const AZURE_SUBSCRIPTION_KEY = process.env.VITE_AZURE_SPEECH_KEY || process.env.AZURE_SPEECH_KEY;
-const AZURE_REGION = process.env.VITE_AZURE_SPEECH_REGION || process.env.AZURE_SPEECH_REGION || 'koreacentral';
+const AZURE_REGION = process.env.VITE_AZURE_SPEECH_REGION || process.env.AZURE_SPEECH_REGION || 'eastasia';
 const AZURE_ENDPOINT = `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v`;
 
 // Gemini API 설정
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+
+// Gemini API 디버깅 강화 버전
+async function debugGeminiAPI(text) {
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+  
+  console.log('🔍 === GEMINI 상세 디버깅 시작 ===');
+  console.log('🔍 1. 환경 정보:');
+  console.log('   - API Key 존재:', !!GEMINI_API_KEY);
+  console.log('   - API Key 길이:', GEMINI_API_KEY ? GEMINI_API_KEY.length : 0);
+  console.log('   - API Key 시작:', GEMINI_API_KEY ? GEMINI_API_KEY.slice(0, 20) + '...' : 'null');
+  console.log('   - Node 버전:', process.version);
+  console.log('   - 입력 텍스트 길이:', text ? text.length : 0);
+  
+  if (!GEMINI_API_KEY) {
+    console.log('❌ API 키가 없음');
+    return null;
+  }
+  
+  // 1단계: 가장 간단한 테스트
+  console.log('🔍 2. 기본 연결 테스트');
+  try {
+    const testUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    
+    const simpleRequest = {
+      contents: [{ 
+        parts: [{ text: "请回复'测试成功'" }] 
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 50
+      }
+    };
+    
+    console.log('🔍 3. 테스트 요청 발송...');
+    const testResponse = await fetch(testUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(simpleRequest)
+    });
+    
+    console.log('🔍 4. 테스트 응답:');
+    console.log('   - 상태:', testResponse.status);
+    console.log('   - 상태 텍스트:', testResponse.statusText);
+    console.log('   - 헤더:', Object.fromEntries(testResponse.headers.entries()));
+    
+    const testResponseText = await testResponse.text();
+    console.log('   - 응답 길이:', testResponseText.length);
+    console.log('   - 응답 내용:', testResponseText.slice(0, 500));
+    
+    if (!testResponse.ok) {
+      console.log('❌ 테스트 요청 실패');
+      try {
+        const errorData = JSON.parse(testResponseText);
+        console.log('❌ 에러 상세:', errorData);
+      } catch (e) {
+        console.log('❌ 에러 파싱 실패:', testResponseText);
+      }
+      return null;
+    }
+    
+    // 성공한 경우 파싱
+    try {
+      const testData = JSON.parse(testResponseText);
+      console.log('✅ 테스트 성공:', testData);
+      
+      const responseContent = testData.candidates?.[0]?.content?.parts?.[0]?.text;
+      console.log('✅ 추출된 응답:', responseContent);
+      
+    } catch (e) {
+      console.log('❌ 응답 파싱 실패:', e.message);
+      return null;
+    }
+    
+  } catch (error) {
+    console.log('❌ 네트워크 오류:', error.message);
+    console.log('❌ 스택:', error.stack);
+    return null;
+  }
+  
+  // 2단계: 실제 구두점 요청
+  console.log('🔍 5. 실제 구두점 개선 요청');
+  try {
+    const punctUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    
+    // 텍스트가 너무 길면 잘라서 테스트
+    const testText = text.length > 200 ? text.slice(0, 200) + '...' : text;
+    
+    const punctPrompt = `请为以下中文文本添加标点符号：
+
+${testText}
+
+请返回JSON格式：{"result": "添加标点后的文本"}`;
+
+    const punctRequest = {
+      contents: [{ 
+        parts: [{ text: punctPrompt }] 
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 1024
+      }
+    };
+    
+    console.log('🔍 6. 구두점 요청 발송...');
+    console.log('   - 프롬프트 길이:', punctPrompt.length);
+    
+    const punctResponse = await fetch(punctUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(punctRequest)
+    });
+    
+    console.log('🔍 7. 구두점 응답:');
+    console.log('   - 상태:', punctResponse.status);
+    console.log('   - 상태 텍스트:', punctResponse.statusText);
+    
+    const punctResponseText = await punctResponse.text();
+    console.log('   - 응답 길이:', punctResponseText.length);
+    console.log('   - 응답 내용:', punctResponseText.slice(0, 500));
+    
+    if (punctResponse.ok && punctResponseText.length > 0) {
+      try {
+        const punctData = JSON.parse(punctResponseText);
+        const resultText = punctData.candidates?.[0]?.content?.parts?.[0]?.text;
+        console.log('✅ 구두점 개선 응답:', resultText);
+        
+        // JSON 추출 시도
+        const jsonMatch = resultText?.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          const extracted = JSON.parse(jsonMatch[0]);
+          console.log('✅ 추출된 결과:', extracted);
+          return extracted.result || extracted.punctuatedText || extracted.text;
+        }
+        
+        return resultText;
+        
+      } catch (e) {
+        console.log('❌ 구두점 응답 파싱 실패:', e.message);
+      }
+    }
+    
+  } catch (error) {
+    console.log('❌ 구두점 요청 오류:', error.message);
+  }
+  
+  return null;
+}
+
+// 강화된 구두점 추가 함수
+function addAdvancedPunctuation(text) {
+  let result = text;
+  
+  console.log('🔧 고급 구두점 알고리즘 적용');
+  
+  // 1. 시간/날짜 표현 뒤에 쉼표
+  result = result.replace(/(一九[四五六七八九][零一二三四五六七八九]年[月日号]*)/g, '$1，');
+  result = result.replace(/(二零[零一二三][零一二三四五六七八九]年[月日号]*)/g, '$1，');
+  result = result.replace(/([十][月日号]+)/g, '$1，');
+  
+  // 2. 기관/부대 이름 뒤에 쉼표
+  result = result.replace(/(陆军第[七十四]+集团军[某旅]*)/g, '$1，');
+  result = result.replace(/(晋察冀军区[一分区]*[一团]*[七连]*)/g, '$1，');
+  result = result.replace(/(狼牙山五壮士连)/g, '$1，');
+  
+  // 3. 동작/상태 표현 뒤에 쉼표
+  const actionWords = ['奉命', '为掩护', '为给', '要求', '表示', '称', '认为', '指出', '强调', '宣布', '决定'];
+  for (const word of actionWords) {
+    const regex = new RegExp(`(${word}[^，。！？]{8,})([^，。！？])`, 'g');
+    result = result.replace(regex, `$1，$2`);
+  }
+  
+  // 4. 연결어 뒤에 쉴표
+  const connectors = ['同时', '然而', '但是', '而且', '另外', '此外', '因此', '所以', '由于', '从此'];
+  for (const conn of connectors) {
+    const regex = new RegExp(`(${conn})([^，。！？]{5,})`, 'g');
+    result = result.replace(regex, `$1，$2`);
+  }
+  
+  // 5. 긴 문장을 자연스럽게 분할 (50자 이상)
+  result = result.replace(/([^。！？]{50,?})(了|的|在|为|与|和|及|对|向|从|到|中|后|时|年|日)([^，。！？]{15,})/g, '$1$2，$3');
+  
+  // 6. 매우 긴 구간에 마침표 추가 (100자 이상)
+  result = result.replace(/([^。！？]{100,?})(了|的|中|后|年|日|时|牺牲|被救|精神|荣誉|传统|任务)([^。！？]{20,})/g, '$1$2。$3');
+  
+  // 7. 문장 끝 마침표 확인
+  if (!result.endsWith('。') && !result.endsWith('！') && !result.endsWith('？')) {
+    result += '。';
+  }
+  
+  // 8. 중복 구두점 정리
+  result = result.replace(/[，]{2,}/g, '，');
+  result = result.replace(/[。]{2,}/g, '。');
+  result = result.replace(/，。/g, '。');
+  
+  return result;
+}
 
 // 디버깅용 로그
 console.log('🔧 [DEBUG] 환경 변수 상태:');
@@ -683,8 +883,8 @@ async function processChunkWithAzure(wavBuffer, chunkStartTime) {
       throw new Error('Azure Speech API 키가 설정되지 않았습니다');
     }
 
-    // 상세한 결과를 위한 엔드포인트와 설정
-    const DETAILED_ENDPOINT = `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/conversation/cognitiveservices/v1`;
+    // 상세한 결과를 위한 엔드포인트와 설정 (dictation 모드로 변경하여 구두점 인식 향상)
+    const DETAILED_ENDPOINT = `https://${AZURE_REGION}.stt.speech.microsoft.com/speech/recognition/dictation/cognitiveservices/v1`;
     
     const params = new URLSearchParams({
       'language': 'zh-CN',
@@ -692,7 +892,22 @@ async function processChunkWithAzure(wavBuffer, chunkStartTime) {
       'profanity': 'raw',
       'wordLevelTimestamps': 'true',
       'punctuationMode': 'DictatedAndAutomatic',
-      'enableDictation': 'true'
+      'enableDictation': 'true',
+      'enableWordLevelTimestamps': 'true',
+      'enableAutomaticPunctuation': 'true',
+      'enableSegmentation': 'true',
+      'enableSentimentAnalysis': 'false',
+      'enableLanguageDetection': 'false',
+      'speechContext': JSON.stringify({
+        'phrases': [
+          {'text': '。', 'boost': 20},
+          {'text': '，', 'boost': 20},
+          {'text': '！', 'boost': 20},
+          {'text': '？', 'boost': 20},
+          {'text': '；', 'boost': 15},
+          {'text': '：', 'boost': 15}
+        ]
+      })
     });
     
     console.log(`🌐 청크 Azure API 호출 (시작시간: ${chunkStartTime}초)`);
@@ -852,7 +1067,7 @@ function mergeChunkResults(chunkResults) {
     const removedDuplicates = [];
     
     for (const sentence of sentences) {
-              const normalized = sentence.replace(/[\s。！？]/g, '').trim();
+              const normalized = sentence.replace(/\s/g, '').trim(); // 구두점 제거하지 않음
       if (normalized.length === 0) continue;
       
       // 이미 있는 문장과 유사도 체크
@@ -863,7 +1078,7 @@ function mergeChunkResults(chunkResults) {
       
       for (let i = 0; i < uniqueSentences.length; i++) {
         const existing = uniqueSentences[i];
-        const existingNorm = existing.replace(/[\s。！？]/g, '').trim();
+        const existingNorm = existing.replace(/\s/g, '').trim(); // 구두점 제거하지 않음
         if (existingNorm.length === 0) continue;
         
         // 방법 1: 포함 관계 체크 (70% 이상)
@@ -1070,31 +1285,43 @@ async function formatTranscriptResult(azureResult, youtubeUrl) {
       } catch {}
     }
     
-    // 구두점 개선: 자연스러운 마침표와 쉼표 추가
+    // ===== 강화된 구두점 개선 로직 =====
     if (displayText && displayText.length > 10) {
-      console.log('🔧 구두점 개선 시도');
+      console.log('🔧 === 강화된 구두점 개선 시작 ===');
       
-      // 기존 구두점이 적으면 개선
-      const punctCount = (displayText.match(/[。！？，]/g) || []).length;
-      const shouldImprove = punctCount < Math.floor(displayText.length / 50);
+      const originalText = displayText;
+      const originalPunct = (originalText.match(/[。，！？；]/g) || []).length;
       
-      if (shouldImprove) {
-        // 문장 끝에 마침표 추가
-        if (!displayText.endsWith('。') && !displayText.endsWith('！') && !displayText.endsWith('？')) {
-          displayText += '。';
-        }
+      console.log(`📊 원본: ${originalText.length}자, 구두점 ${originalPunct}개`);
+      
+      // 1단계: Gemini 디버깅 및 시도
+      let geminiResult = null;
+      try {
+        console.log('🤖 Gemini 디버깅 시작');
+        geminiResult = await debugGeminiAPI(originalText);
         
-        // 자연스러운 위치에 쉼표 추가 (특정 키워드 뒤)
-        const naturalBreaks = ['报道称', '表示', '称', '说', '认为', '指出', '强调', '宣布', '决定', '要求'];
-        for (const breakWord of naturalBreaks) {
-          const regex = new RegExp(`(${breakWord})([^，。！？]{8,})`, 'g');
-          displayText = displayText.replace(regex, '$1，$2');
+        if (geminiResult && geminiResult.length > originalText.length * 0.8) {
+          const geminiPunct = (geminiResult.match(/[。，！？；]/g) || []).length;
+          console.log(`✅ Gemini 성공: ${geminiPunct}개 구두점`);
+          displayText = geminiResult;
+        } else {
+          console.log('⚠️ Gemini 결과 불충분, 기본 알고리즘 사용');
+          geminiResult = null;
         }
-        
-        console.log('🔧 구두점 개선 후:', displayText);
-      } else {
-        console.log('🔧 구두점이 이미 충분함, 건너뜀');
+      } catch (e) {
+        console.log('❌ Gemini 오류:', e.message);
+        geminiResult = null;
       }
+      
+      // 2단계: Gemini 실패 시 강화된 기본 알고리즘
+      if (!geminiResult) {
+        console.log('🔧 강화된 기본 구두점 알고리즘 적용');
+        displayText = addAdvancedPunctuation(originalText);
+      }
+      
+      const finalPunct = (displayText.match(/[。，！？；]/g) || []).length;
+      console.log(`✅ 최종 결과: ${originalPunct}개 → ${finalPunct}개 구두점`);
+      console.log(`📝 샘플: ${displayText.slice(0, 100)}...`);
     }
     // Azure 단어 시간 정보를 활용한 자연스러운 문장 단위 분할
     let formattedSegments = [];
@@ -1106,7 +1333,7 @@ async function formatTranscriptResult(azureResult, youtubeUrl) {
       const MAX_SILENCE_GAP = 2.0; // 최대 허용 침묵 구간
 
       const isPunct = (ch) => /[。！？]/.test(ch);
-      const stripPunct = (s) => (s || '').replace(/[。！？\s]/g, '');
+      const stripPunct = (s) => (s || '').replace(/\s/g, ''); // 구두점 제거하지 않음
 
       // 1) 침묵 구간과 의미 단위를 기반으로 한 자연스러운 분할
       let segmentId = 1;
@@ -1287,7 +1514,7 @@ async function formatTranscriptResult(azureResult, youtubeUrl) {
     // 연속 중복 세그먼트 병합/제거: 같은 문장이 두 번 나오면 한 번만 남김
     try {
       const normalize = (s) => (s || '')
-        .replace(/[\s。！？]/g, '')
+        .replace(/\s/g, '') // 구두점 제거하지 않음
         .trim();
       let i = 0;
       while (i < formattedSegments.length - 1) {
@@ -1479,7 +1706,7 @@ ${timingInfo}
 - 最后一个分段的结束时间应接近影片总长度（误差不超过1秒）`;
 
         const apiKey = GEMINI_API_KEY;
-        const heavyUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+        const heavyUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
         const geminiResponse = await fetch(heavyUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1492,8 +1719,26 @@ ${timingInfo}
           })
         });
 
+        // 상태 코드 확인
+        console.log("🔎 Gemini status:", geminiResponse.status, geminiResponse.statusText);
+
+        // 헤더 로그
+        console.log("🔎 Gemini headers:", Object.fromEntries(geminiResponse.headers.entries()));
+
         if (geminiResponse.ok) {
-          const geminiData = await geminiResponse.json();
+          // 응답 원본 텍스트 확인
+          const raw = await geminiResponse.text();
+          console.log("📥 Gemini raw response:", raw);
+
+          // 이후 JSON 파싱 시도
+          let geminiData;
+          try {
+            geminiData = JSON.parse(raw);
+          } catch (e) {
+            console.error("⚠️ Gemini JSON parse 실패:", e.message);
+            return null;
+          }
+
           const responseText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
           
           console.log('📥 Gemini 원본 응답 길이:', responseText.length, '자');
@@ -1600,7 +1845,7 @@ ${timingInfo}
         const startTime = Date.now();
         
         const apiKey = GEMINI_API_KEY;
-        const lightModeUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+        const lightModeUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
         const geminiResponse = await fetch(lightModeUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1615,7 +1860,19 @@ ${timingInfo}
         console.log('   - 응답 헤더:', Object.fromEntries(geminiResponse.headers.entries()));
         
         if (geminiResponse.ok) {
-          const geminiData = await geminiResponse.json();
+          // 응답 원본 텍스트 확인
+          const raw = await geminiResponse.text();
+          console.log("📥 Gemini raw response:", raw);
+
+          // 이후 JSON 파싱 시도
+          let geminiData;
+          try {
+            geminiData = JSON.parse(raw);
+          } catch (e) {
+            console.error("⚠️ Gemini JSON parse 실패:", e.message);
+            return null;
+          }
+
           const responseText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
           const jsonMatch = responseText.match(/\{[\s\S]*\}/);
           if (jsonMatch) {
@@ -1663,7 +1920,7 @@ ${timingInfo}
               await new Promise(resolve => setTimeout(resolve, 3000)); // 3초 대기
               
               const apiKey = GEMINI_API_KEY;
-              const retryUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+              const retryUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
               const retryResponse = await fetch(retryUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1671,7 +1928,19 @@ ${timingInfo}
               });
               
               if (retryResponse.ok) {
-                const retryData = await retryResponse.json();
+                // 응답 원본 텍스트 확인
+                const raw = await retryResponse.text();
+                console.log("📥 Gemini retry raw response:", raw);
+
+                // 이후 JSON 파싱 시도
+                let retryData;
+                try {
+                  retryData = JSON.parse(raw);
+                } catch (e) {
+                  console.error("⚠️ Gemini retry JSON parse 실패:", e.message);
+                  return null;
+                }
+
                 const responseText = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '';
                 const jsonMatch = responseText.match(/\{[\s\S]*\}/);
                 if (jsonMatch) {
@@ -1720,7 +1989,7 @@ ${timingInfo}
         console.log('⚠️ 2. 기본 일관성 체크만 수행');
         
         // 기본 누락 문장 보강 (기존 로직 유지)
-        const normalize = (s) => (s || '').replace(/[\s。！？]/g, '').trim();
+        const normalize = (s) => (s || '').replace(/\s/g, '').trim(); // 구두점 제거하지 않음
         const sentSplit = (s) => (s || '')
           .split(/(?<=[。！？])/)
           .map(x => x.trim())
