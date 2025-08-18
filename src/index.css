@@ -33,7 +33,6 @@ html, body, #root {
   font-size: 16px;
   line-height: 1.8;
   font-weight: 400;
-  color: #333;
 }
 
 /* 세그먼트 텍스트 스타일 */
@@ -53,5 +52,26 @@ html, body, #root {
 }
 .animate-fadeIn {
   animation: fadeIn 400ms ease-out both;
+}
+
+/* 🎨 헤더 애니메이션 */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes gradientShift {
+  0%, 100% { 
+    background-position: 0% 50%; 
+  }
+  50% { 
+    background-position: 100% 50%; 
+  }
 }
 

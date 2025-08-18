@@ -4,9 +4,11 @@ import type { RecommendedVideo } from '../data/recommendedVideos'
 interface RecommendedVideoCardProps {
   video: RecommendedVideo
   onClick: () => void
+  isFavorite?: boolean
+  onToggleFavorite?: () => void
 }
 
-export function RecommendedVideoCard({ video, onClick }: RecommendedVideoCardProps) {
+export function RecommendedVideoCard({ video, onClick, isFavorite = false, onToggleFavorite }: RecommendedVideoCardProps) {
   return (
     <div 
       onClick={onClick}
@@ -60,16 +62,64 @@ export function RecommendedVideoCard({ video, onClick }: RecommendedVideoCardPro
         <div className="text-xs text-gray-500 mt-0.5">
           {video.views} • {video.uploadTime}
         </div>
+        
+        {/* 난이도 및 카테고리 */}
+        <div className="flex items-center gap-2 mt-2">
+          {/* 난이도 */}
+          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+            video.difficulty === 'easy' ? 'bg-green-100 text-green-700' :
+            video.difficulty === 'medium' ? 'bg-yellow-100 text-yellow-700' :
+            'bg-red-100 text-red-700'
+          }`}>
+            {video.difficulty === 'easy' ? '쉬움' :
+             video.difficulty === 'medium' ? '보통' : '어려움'}
+          </span>
+          
+          {/* 카테고리 */}
+          <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
+            {video.category === 'news' ? '뉴스' :
+             video.category === 'education' ? '교육' :
+             video.category === 'entertainment' ? '엔터테인먼트' :
+             video.category === 'culture' ? '문화' :
+             video.category === 'technology' ? '기술' :
+             video.category === 'business' ? '비즈니스' :
+             video.category === 'history' ? '역사' :
+             video.category === 'comedy' ? '코미디' :
+             video.category === 'documentary' ? '다큐멘터리' : video.category}
+          </span>
+        </div>
+        
+
       </div>
 
-      {/* 더보기 메뉴 (옵션) */}
-      <div className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button className="p-1 text-gray-400 hover:text-gray-600 rounded">
-          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-            <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
-          </svg>
-        </button>
-      </div>
+      {/* 즐겨찾기 버튼 */}
+      {onToggleFavorite && (
+        <div className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button 
+            onClick={(e) => {
+              console.log('💖 즐겨찾기 하트 버튼 클릭됨!')
+              console.log('📋 비디오 정보:', {
+                id: video.id,
+                title: video.title,
+                isFavorite: isFavorite
+              })
+              e.stopPropagation()
+              console.log('🔄 onToggleFavorite 함수 호출 중...')
+              onToggleFavorite()
+            }}
+            className={`p-1 rounded transition-colors ${
+              isFavorite 
+                ? 'text-red-500 hover:text-red-600' 
+                : 'text-gray-400 hover:text-red-500'
+            }`}
+            title={isFavorite ? '즐겨찾기에서 제거' : '즐겨찾기에 추가'}
+          >
+            <svg className="w-4 h-4" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   )
 }

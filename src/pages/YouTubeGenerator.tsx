@@ -3,13 +3,15 @@ import { useNavigate } from 'react-router-dom'
 import { useVideoProcessing } from '../contexts/VideoProcessingContext'
 import { validateYouTubeUrl, extractVideoId } from '../utils/youtube.validation'
 import type { VideoInfo } from '../types/youtube.types'
-import { VideoHistoryService, type VideoHistoryItem } from '../services/videoHistoryService'
+
 import { useAuth } from '../contexts/AuthContext'
 import { UserProfile } from '../components/UserProfile'
 import { LoginModal } from '../components/LoginModal'
 import { recommendedVideos } from '../data/recommendedVideos'
 import { RecommendedVideoCard } from '../components/RecommendedVideoCard'
 import { useAzureProcessing } from '../services/azureProcessingService'
+import { addToFavorites, removeFromFavorites, getFavorites } from '../services/favoritesService'
+import { FavoritesModal } from '../components/FavoritesModal'
 
 const styles = {
   background: 'bg-gradient-to-br from-sky-50 to-blue-100',
@@ -31,9 +33,11 @@ export default function YouTubeGenerator() {
   const [error, setError] = useState('')
   const [verified, setVerified] = useState(false)
   const [videoId, setVideoId] = useState('')
-  const [history, setHistory] = useState<VideoHistoryItem[]>([])
-  const [showHistory, setShowHistory] = useState(false)
+
   const [showLoginModal, setShowLoginModal] = useState(false)
+  const [showFavoritesModal, setShowFavoritesModal] = useState(false)
+  const [favoriteIds, setFavoriteIds] = useState<string[]>([])
+  const [isLoggedIn, setIsLoggedIn] = useState(false)
   const derivedId = extractVideoId(url || '')
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const playerRef = useRef<any>(null)
@@ -51,59 +55,106 @@ export default function YouTubeGenerator() {
     return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`
   }
 
-  // 즐겨찾기 로드 및 임시 저장 정리
+  // 로그인 상태 및 즐겨찾기 로드
   useEffect(() => {
-    const loadFavorites = () => {
-      // 임시 저장된 항목들 정리 (7일 이상된 것들)
-      VideoHistoryService.cleanupTemporary()
+    const loadUserData = async () => {
+      console.log('🔄 사용자 데이터 로딩 시작...')
+      console.log('📋 currentUser 상태:', currentUser)
+      console.log('📋 localStorage에서 userId:', localStorage.getItem('userId'))
       
-      // 즐겨찾기만 가져오기
-      const favorites = VideoHistoryService.getFavorites()
-      setHistory(favorites)
-      setShowHistory(favorites.length > 0)
-    }
-    loadFavorites()
-  }, [])
-
-  // 히스토리 아이템 클릭 핸들러
-  const handleHistoryClick = (item: VideoHistoryItem) => {
-    // 처리된 결과를 localStorage에 저장하고 결과 페이지로 이동
-    try {
-      const result = {
-        text: item.text,
-        segments: item.segments,
-        language: item.language,
-        url: item.url,
-        processed_at: item.processedAt
+      // AuthContext의 currentUser 상태를 우선 확인
+      if (currentUser) {
+        console.log('✅ currentUser 발견, 로그인 상태로 설정')
+        setIsLoggedIn(true)
+        
+        const userId = localStorage.getItem('userId')
+        if (userId) {
+          try {
+            console.log('🌐 서버에서 즐겨찾기 목록 가져오는 중...')
+            const favorites = await getFavorites(userId)
+            console.log('📋 서버에서 받은 즐겨찾기:', favorites)
+            console.log('📋 추천 영상 ID 목록:', recommendedVideos.map(v => ({ id: v.id, title: v.title })))
+            setFavoriteIds(favorites)
+          } catch (error) {
+            console.error('❌ 즐겨찾기 로딩 실패:', error)
+            setFavoriteIds([])
+          }
+        } else {
+          console.log('⚠️ currentUser는 있지만 userId가 없음')
+          setFavoriteIds([])
+        }
+      } else {
+        console.log('❌ currentUser 없음, 로그아웃 상태로 설정')
+        setIsLoggedIn(false)
+        setFavoriteIds([])
       }
-      localStorage.setItem('processingResult', JSON.stringify(result))
-      navigate('/visual-interpretation')
+    }
+    loadUserData()
+  }, [currentUser]) // currentUser가 변경될 때마다 실행
+
+
+
+  // 즐겨찾기 토글 (로그인 기반)
+  const handleToggleFavorite = async (videoId: string) => {
+    console.log('🎯 즐겨찾기 토글 시작:', videoId)
+    
+    const userId = localStorage.getItem('userId')
+    console.log('📋 userId:', userId)
+    
+    if (!userId) {
+      console.log('❌ userId 없음, 로그인 모달 표시')
+      setShowLoginModal(true)
+      return
+    }
+    
+    console.log('📊 현재 favoriteIds:', favoriteIds)
+    console.log('🔍 videoId가 favoriteIds에 포함되어 있나?', favoriteIds.includes(videoId))
+    
+    try {
+      if (favoriteIds.includes(videoId)) {
+        // 즐겨찾기 제거
+        console.log('🗑️ 즐겨찾기 제거 시도:', videoId)
+        const success = await removeFromFavorites(userId, videoId)
+        console.log('✅ 즐겨찾기 제거 결과:', success)
+        if (success) {
+          setFavoriteIds(prev => {
+            const newIds = prev.filter(id => id !== videoId)
+            console.log('🔄 favoriteIds 업데이트 (제거):', newIds)
+            return newIds
+          })
+        }
+      } else {
+        // 즐겨찾기 추가
+        console.log('➕ 즐겨찾기 추가 시도:', videoId)
+        const success = await addToFavorites(userId, videoId)
+        console.log('✅ 즐겨찾기 추가 결과:', success)
+        if (success) {
+          setFavoriteIds(prev => {
+            const newIds = [...prev, videoId]
+            console.log('🔄 favoriteIds 업데이트 (추가):', newIds)
+            return newIds
+          })
+        }
+      }
     } catch (error) {
-      console.error('[YouTubeGenerator] 히스토리 아이템 클릭 오류:', error)
+      console.error('❌ 즐겨찾기 토글 오류:', error)
     }
   }
 
-  // 즐겨찾기 아이템 삭제
-  const handleDeleteHistoryItem = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation() // 클릭 이벤트 전파 방지
-    VideoHistoryService.removeFromHistory(id)
-    setHistory(VideoHistoryService.getFavorites()) // 즐겨찾기만 다시 로드
+  // 로그아웃
+  const handleLogout = () => {
+    localStorage.removeItem('userId')
+    setIsLoggedIn(false)
+    setFavoriteIds([])
+    // 기존 Firebase 로그아웃도 함께
+    if (currentUser) {
+      // Firebase 로그아웃 로직이 있다면 여기에 추가
+    }
   }
 
-  // 상대 시간 포맷팅
-  const formatRelativeTime = (dateString: string): string => {
-    const now = new Date()
-    const date = new Date(dateString)
-    const diffMs = now.getTime() - date.getTime()
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
-    const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
-    const diffMinutes = Math.floor(diffMs / (1000 * 60))
 
-    if (diffDays > 0) return `${diffDays}일 전`
-    if (diffHours > 0) return `${diffHours}시간 전`
-    if (diffMinutes > 0) return `${diffMinutes}분 전`
-    return '방금 전'
-  }
+
+
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -204,7 +255,8 @@ export default function YouTubeGenerator() {
   return (
     <div className={`${styles.background} min-h-screen animate-fadeIn`}>
       {/* 네비게이션 헤더 */}
-      <div className="absolute top-0 right-0 p-6 z-10">
+      <div className="absolute top-0 right-0 p-6 z-10 flex items-center gap-3">
+        {/* 기존 로그인 버튼 */}
         {currentUser ? (
           <UserProfile />
         ) : (
@@ -218,13 +270,48 @@ export default function YouTubeGenerator() {
             로그인
           </button>
         )}
+        
+        {/* 즐겨찾기 버튼 (로그인된 경우) */}
+        {isLoggedIn && (
+          <button
+            onClick={() => {
+              console.log('🎯 즐겨찾기 버튼 클릭됨!')
+              console.log('📊 현재 상태:')
+              console.log('  - showFavoritesModal:', showFavoritesModal)
+              console.log('  - isLoggedIn:', isLoggedIn)
+              console.log('  - currentUser:', currentUser)
+              console.log('  - favoriteIds:', favoriteIds)
+              console.log('  - localStorage userId:', localStorage.getItem('userId'))
+              
+              // 상태 변경 전후 로그
+              console.log('🔄 showFavoritesModal을 true로 설정 중...')
+              setShowFavoritesModal(true)
+              
+              // 다음 렌더링에서 상태 확인
+              setTimeout(() => {
+                console.log('⏰ 100ms 후 showFavoritesModal 상태:', showFavoritesModal)
+              }, 100)
+            }}
+            className="px-3 py-2 rounded-lg bg-pink-500 text-white hover:bg-pink-600 shadow-md focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-offset-2 transition-all duration-200 flex items-center gap-2 text-sm"
+            title="즐겨찾기 목록 보기"
+          >
+            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+            </svg>
+            즐겨찾기 ({favoriteIds.length})
+          </button>
+        )}
       </div>
 
       <div className={styles.container}>
         {/* 페이지 제목 */}
-        <div className="text-center text-black mb-12">
-          <h1 className="text-6xl font-extrabold mb-4"> YouTube 실시간 통역 연습 생성기</h1>
-          <p className="text-2xl opacity-90">YouTube 영상에서 바로 통역 연습 환경을 만들어보세요</p>
+        <div className="text-center mb-12">
+          <div className="inline-block p-8 md:p-16 bg-white/20 backdrop-blur-xl rounded-[20px] border-2 border-white/40 shadow-2xl">
+            {/* 메인 제목 */}
+            <h1 className="text-3xl md:text-6xl font-bold bg-gradient-to-r from-red-600 via-purple-600 to-blue-600 bg-[length:300%_300%] animate-[gradientShift_4s_ease-in-out_infinite,fadeInUp_1s_ease-out_0.6s_forwards] bg-clip-text text-transparent opacity-0">
+              YouTube 실시간 통역 연습 생성기<span className="text-white ml-2 md:ml-4 text-2xl md:text-4xl animate-bounce">🎬</span>
+            </h1>
+          </div>
         </div>
 
         {/* 메인 레이아웃: 왼쪽 입력/정보, 오른쪽 추천 리스트 */}
@@ -407,6 +494,8 @@ export default function YouTubeGenerator() {
                     <RecommendedVideoCard
                       key={video.id}
                       video={video}
+                      isFavorite={favoriteIds.includes(video.id)}
+                      onToggleFavorite={() => handleToggleFavorite(video.id)}
                       onClick={() => {
                         if (video.processedData) {
                           // 사전 변환된 데이터가 있으면 바로 결과 페이지로 이동
@@ -460,106 +549,21 @@ export default function YouTubeGenerator() {
           </div>
         </div>
 
-        {/* 사용자 즐겨찾기 섹션 (로그인한 경우만) */}
-        {currentUser && showHistory && (
-          <div className="max-w-4xl mx-auto mt-8">
-              <div className={styles.card}>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-gray-900">⭐ 내 즐겨찾기</h2>
-                  <div className="text-sm text-gray-500">
-                    {history.length}개 즐겨찾기 • 전체 {VideoHistoryService.getStats().totalSizeKB}KB 사용
-                  </div>
-                </div>
-                
-                <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {history.slice(0, 10).map((item) => (
-                    <div
-                      key={item.id}
-                      onClick={() => handleHistoryClick(item)}
-                      className="flex items-center p-4 bg-gray-50 hover:bg-blue-50 rounded-lg cursor-pointer transition-colors group"
-                    >
-                      {/* 썸네일 */}
-                      <div className="w-16 h-12 flex-shrink-0 rounded overflow-hidden bg-gray-200">
-                        <img
-                          src={item.thumbnail}
-                          alt="thumbnail"
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            const target = e.currentTarget as HTMLImageElement
-                            target.onerror = null
-                            target.src = 'https://www.youtube.com/s/desktop/fe8e0a7f/img/favicon_144x144.png'
-                          }}
-                        />
-                      </div>
-                      
-                      {/* 정보 */}
-                      <div className="flex-1 ml-4 min-w-0">
-                        <div className="font-medium text-gray-900 truncate group-hover:text-blue-700 chinese-text">
-                          {item.title}
-                        </div>
-                        <div className="text-sm text-gray-500 truncate mt-1">
-                          {item.text.slice(0, 80)}...
-                        </div>
-                        <div className="text-xs text-gray-400 mt-1">
-                          {formatRelativeTime(item.processedAt)} • {item.segments.length}개 세그먼트
-                        </div>
-                      </div>
-                      
-                      {/* 삭제 버튼 */}
-                      <button
-                        onClick={(e) => handleDeleteHistoryItem(item.id, e)}
-                        className="ml-3 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                        title="삭제"
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                
-                {history.length > 10 && (
-                  <div className="mt-4 text-center text-sm text-gray-500">
-                    {history.length - 10}개 더 있음 (최신 10개만 표시)
-                  </div>
-                )}
-                
-                {history.length > 0 && (
-                  <div className="mt-4 pt-4 border-t border-gray-200 text-center">
-                    <p className="text-sm text-gray-600 mb-2">
-                      💡 결과 페이지에서 "⭐ 즐겨찾기 추가" 버튼을 눌러 여기에 저장하세요!
-                    </p>
-                    <button
-                      onClick={() => {
-                        if (confirm('모든 즐겨찾기를 삭제하시겠습니까?')) {
-                          const favorites = VideoHistoryService.getFavorites()
-                          favorites.forEach(item => VideoHistoryService.removeFromHistory(item.id))
-                          setHistory([])
-                          setShowHistory(false)
-                        }
-                      }}
-                      className="text-sm text-red-600 hover:text-red-700 transition-colors"
-                    >
-                      모든 즐겨찾기 삭제
-                    </button>
-                  </div>
-                )}
-                
-                {history.length === 0 && (
-                  <div className="text-center py-8 text-gray-500">
-                    <div className="text-4xl mb-4">⭐</div>
-                    <p className="text-lg font-medium mb-2">아직 즐겨찾기가 없습니다</p>
-                    <p className="text-sm">영상을 처리한 후 결과 페이지에서 즐겨찾기로 추가해보세요!</p>
-                  </div>
-                )}
-              </div>
-          </div>
-        )}
+
       </div>
 
       {/* 로그인 모달 */}
       <LoginModal 
         isOpen={showLoginModal} 
         onClose={() => setShowLoginModal(false)} 
+      />
+
+      {/* 즐겨찾기 모달 */}
+      <FavoritesModal
+        isOpen={showFavoritesModal}
+        onClose={() => setShowFavoritesModal(false)}
+        favoriteIds={favoriteIds}
+        onToggleFavorite={handleToggleFavorite}
       />
     </div>
   )

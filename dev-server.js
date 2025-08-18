@@ -55,6 +55,97 @@ const setupRoutes = async () => {
   }
 };
 
+// 🎯 즐겨찾기 데이터 저장소 (실제로는 DB 사용)
+const favorites = new Map(); // user_id -> Set of video_ids
+
+// 🎯 즐겨찾기 API 엔드포인트들
+app.post('/api/favorites/add', (req, res) => {
+  try {
+    const { userId, videoId } = req.body;
+    
+    if (!userId || !videoId) {
+      return res.status(400).json({ error: '사용자 ID와 비디오 ID가 필요합니다' });
+    }
+    
+    if (!favorites.has(userId)) {
+      favorites.set(userId, new Set());
+    }
+    
+    favorites.get(userId).add(videoId);
+    
+    console.log(`✅ 즐겨찾기 추가: 사용자 ${userId} -> 비디오 ${videoId}`);
+    res.json({ success: true, message: '즐겨찾기에 추가되었습니다' });
+    
+  } catch (error) {
+    console.error('즐겨찾기 추가 오류:', error);
+    res.status(500).json({ error: '즐겨찾기 추가 중 오류가 발생했습니다' });
+  }
+});
+
+app.delete('/api/favorites/remove', (req, res) => {
+  try {
+    const { userId, videoId } = req.body;
+    
+    if (!userId || !videoId) {
+      return res.status(400).json({ error: '사용자 ID와 비디오 ID가 필요합니다' });
+    }
+    
+    if (favorites.has(userId)) {
+      favorites.get(userId).delete(videoId);
+    }
+    
+    console.log(`❌ 즐겨찾기 제거: 사용자 ${userId} -> 비디오 ${videoId}`);
+    res.json({ success: true, message: '즐겨찾기에서 제거되었습니다' });
+    
+  } catch (error) {
+    console.error('즐겨찾기 제거 오류:', error);
+    res.status(500).json({ error: '즐겨찾기 제거 중 오류가 발생했습니다' });
+  }
+});
+
+app.get('/api/favorites/:userId', (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!userId) {
+      return res.status(400).json({ error: '사용자 ID가 필요합니다' });
+    }
+    
+    const userFavorites = favorites.has(userId) ? Array.from(favorites.get(userId)) : [];
+    
+    console.log(`📋 즐겨찾기 조회: 사용자 ${userId} -> ${userFavorites.length}개`);
+    res.json({ favorites: userFavorites });
+    
+  } catch (error) {
+    console.error('즐겨찾기 조회 오류:', error);
+    res.status(500).json({ error: '즐겨찾기 조회 중 오류가 발생했습니다' });
+  }
+});
+
+// 🎯 간단한 로그인 API (테스트용)
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    // 간단한 테스트용 로그인 (실제로는 DB 검증 필요)
+    if (email === 'test@example.com' && password === 'password') {
+      const userId = 'user_' + Date.now();
+      console.log(`🔐 로그인 성공: ${email} -> ${userId}`);
+      res.json({ 
+        success: true, 
+        userId: userId,
+        message: '로그인되었습니다' 
+      });
+    } else {
+      res.status(401).json({ error: '이메일 또는 비밀번호가 올바르지 않습니다' });
+    }
+    
+  } catch (error) {
+    console.error('로그인 오류:', error);
+    res.status(500).json({ error: '로그인 중 오류가 발생했습니다' });
+  }
+});
+
 // 에러 핸들링 추가
 process.on('uncaughtException', (error) => {
   console.error('🚨 Uncaught Exception:', error);

@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
+import { login as loginService } from '../services/favoritesService'
 
 interface LoginModalProps {
   isOpen: boolean
@@ -28,7 +29,16 @@ export function LoginModal({ isOpen, onClose }: LoginModalProps) {
       if (isSignUp) {
         await signup(email, password)
       } else {
-        await login(email, password)
+        // 새로운 로그인 서비스 사용
+        const result = await loginService(email, password)
+        if (result.success && result.userId) {
+          // 로그인 성공 시 userId를 localStorage에 저장
+          localStorage.setItem('userId', result.userId)
+          await login(email, password) // 기존 Firebase 로그인도 유지
+        } else {
+          setError(result.message || '로그인에 실패했습니다')
+          return
+        }
       }
       
       onClose()

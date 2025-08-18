@@ -5,6 +5,7 @@ import { auth } from '../firebase'
 // import { db } from '../firebase'  // Firestore 사용 시 활성화
 // import { doc, setDoc } from 'firebase/firestore'  // Firestore 사용 시 활성화
 import { VideoHistoryService } from '../services/videoHistoryService'
+import { addToFavorites, removeFromFavorites, getFavorites } from '../services/favoritesService'
 
 declare global {
   interface Window {
@@ -111,6 +112,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
   // 즐겨찾기 상태
   const [isFavorite, setIsFavorite] = useState(false)
   const [currentVideoUrl, setCurrentVideoUrl] = useState('')
+  const [currentVideoId, setCurrentVideoId] = useState('')
 
   // Refs for recording functionality
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
@@ -143,8 +145,16 @@ const ProcessedVisualInterpretation: React.FC = () => {
         // 즐겨찾기 상태 확인
         const videoUrl = originalUrl || `https://www.youtube.com/watch?v=${id}`
         setCurrentVideoUrl(videoUrl)
-        if (videoUrl) {
-          setIsFavorite(VideoHistoryService.isFavorite(videoUrl))
+        setCurrentVideoId(id || '')
+        
+        // 로그인 기반 즐겨찾기 상태 확인
+        const userId = localStorage.getItem('userId')
+        if (userId && id) {
+          getFavorites(userId).then(favorites => {
+            setIsFavorite(favorites.includes(id))
+          }).catch(error => {
+            console.error('즐겨찾기 상태 확인 실패:', error)
+          })
         }
         
         setIsDataLoaded(true)
@@ -162,17 +172,46 @@ const ProcessedVisualInterpretation: React.FC = () => {
     setSyncOffset(0)
   }, [youtubeVideoId])
 
-  // 즐겨찾기 토글 핸들러
-  const handleToggleFavorite = () => {
-    if (!currentVideoUrl) return
+  // 즐겨찾기 토글 핸들러 (로그인 기반)
+  const handleToggleFavorite = async () => {
+    console.log('🎯 즐겨찾기 토글 시작')
+    console.log('📋 localStorage 내용:')
+    console.log('  - userId:', localStorage.getItem('userId'))
+    console.log('  - 모든 키:', Object.keys(localStorage))
     
-    const newFavoriteStatus = VideoHistoryService.toggleFavorite(currentVideoUrl)
-    setIsFavorite(newFavoriteStatus)
+    const userId = localStorage.getItem('userId')
+    if (!userId) {
+      console.log('❌ userId가 없음')
+      alert('로그인이 필요합니다.')
+      return
+    }
     
-    if (newFavoriteStatus) {
-      alert('⭐ 즐겨찾기에 추가되었습니다!')
-    } else {
-      alert('즐겨찾기에서 제거되었습니다.')
+    console.log('✅ userId 발견:', userId)
+    
+    if (!currentVideoId) {
+      alert('비디오 ID를 찾을 수 없습니다.')
+      return
+    }
+    
+    try {
+      if (isFavorite) {
+        // 즐겨찾기 제거
+        const success = await removeFromFavorites(userId, currentVideoId)
+        if (success) {
+          setIsFavorite(false)
+          alert('즐겨찾기에서 제거되었습니다.')
+        }
+      } else {
+        // 즐겨찾기 추가
+        const success = await addToFavorites(userId, currentVideoId)
+        if (success) {
+          setIsFavorite(true)
+          alert('⭐ 즐겨찾기에 추가되었습니다!')
+        }
+      }
+    } catch (error) {
+      console.error('즐겨찾기 토글 오류:', error)
+      alert('즐겨찾기 작업 중 오류가 발생했습니다.')
     }
   }
 
@@ -349,8 +388,8 @@ const ProcessedVisualInterpretation: React.FC = () => {
     return (
       <div className="flex gap-1">
         {Array.from({ length: maxStars }, (_, i) => (
-          <span key={i} className={`text-lg ${i < numericStars ? 'text-yellow-400' : 'text-gray-300'}`}>
-            ⭐
+          <span key={i} className={`text-lg ${i < numericStars ? 'text-yellow-400' : 'text-gray-600'}`}>
+            {i < numericStars ? '⭐' : '☆'}
           </span>
         ))}
       </div>
@@ -787,12 +826,12 @@ JSON 형식으로만 응답:
                 </button>
                 {segments.length > 0 && currentScript < segments.length ? (
                   !hideOriginalText ? (
-                    <div className="text-lg mb-2 text-yellow-300 script-text">{segments[currentScript].original_text}</div>
+                    <div className="text-lg mb-2 text-white script-text">{segments[currentScript].original_text}</div>
                   ) : (
-                    <div className="text-gray-400 italic text-sm">원문이 숨겨져 있습니다</div>
+                    <div className="text-white italic text-sm">원문이 숨겨져 있습니다</div>
                   )
                 ) : (
-                  <div className="text-gray-400">자막을 선택해주세요</div>
+                  <div className="text-white">자막을 선택해주세요</div>
                 )}
               </div>
 
