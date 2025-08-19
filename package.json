@@ -7,7 +7,7 @@
     "start": "vite",
     "dev": "concurrently \"npm:dev:client\" \"npm:dev:api\"",
     "dev:client": "vite",
-    "dev:api": "node dev-server.js",
+    "dev:api": "node --max-old-space-size=8192 dev-server.js",
     "build": "vite build",
     "preview": "vite preview"
   },

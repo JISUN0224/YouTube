@@ -174,7 +174,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
 
   // 즐겨찾기 토글 핸들러 (로그인 기반)
   const handleToggleFavorite = async () => {
-    console.log('🎯 즐겨찾기 토글 시작')
+    // 즐겨찾기 토글 시작
     console.log('📋 localStorage 내용:')
     console.log('  - userId:', localStorage.getItem('userId'))
     console.log('  - 모든 키:', Object.keys(localStorage))
@@ -223,87 +223,7 @@ const ProcessedVisualInterpretation: React.FC = () => {
     return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')},${milliseconds.toString().padStart(3, '0')}`
   }
 
-  const handleAddToRecommended = async () => {
-    try {
-      const raw = localStorage.getItem('processingResult')
-      if (!raw) {
-        alert('처리 결과가 없습니다.')
-        return
-      }
-      const data = JSON.parse(raw)
-      const url = currentVideoUrl || localStorage.getItem('currentYouTubeUrl') || ''
-      const vid = extractVideoId(url || '') || youtubeVideoId
-      const thumb = vid ? `https://img.youtube.com/vi/${vid}/mqdefault.jpg` : ''
 
-      const lastEnd = segments.length > 0 ? (segments[segments.length - 1].end_seconds ?? timeToSeconds(segments[segments.length - 1].end_time || segments[segments.length - 1].end)) : 0
-      const durationStr = (() => {
-        const totalSeconds = Math.floor(lastEnd || 0)
-        const h = Math.floor(totalSeconds / 3600)
-        const m = Math.floor((totalSeconds % 3600) / 60)
-        const s = totalSeconds % 60
-        return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`
-      })()
-
-      const recommendedSegments = segments.map((seg, idx) => {
-        const startNum = seg.start_seconds ?? timeToSeconds(seg.start_time)
-        const endNum = seg.end_seconds ?? timeToSeconds(seg.end_time)
-        return {
-          id: seg.id ?? idx + 1,
-          seek: startNum || 0,
-          start: startNum || 0,
-          end: endNum || 0,
-          start_time: seg.start_time || formatSecondsToTimeString(startNum || 0),
-          end_time: seg.end_time || formatSecondsToTimeString(endNum || 0),
-          text: seg.original_text || '',
-          original_text: seg.original_text || '',
-        }
-      })
-
-      const snippetObj = {
-        id: String(Date.now()),
-        title: data?.video_info?.title || '추천 항목',
-        channel: data?.video_info?.speaker || 'YouTube',
-        duration: durationStr,
-        views: '',
-        uploadTime: '',
-        thumbnail: thumb,
-        url,
-        description: data?.video_info?.description || '',
-        verified: true,
-        processedData: {
-          text: (data?.full_text || data?.text) ?? recommendedSegments.map((s: any) => s.text).join(' '),
-          segments: recommendedSegments,
-          language: data?.language || data?.video_info?.language || 'zh-CN',
-          processed_at: new Date().toISOString(),
-        }
-      }
-
-      // 로컬 보관(선택): 사용자 커스텀 추천 리스트
-      try {
-        const existing = JSON.parse(localStorage.getItem('recommended_custom') || '[]')
-        localStorage.setItem('recommended_custom', JSON.stringify([snippetObj, ...existing]))
-      } catch {}
-
-      // 코드 스니펫 클립보드 복사(하드코딩 리스트에 붙여넣기 용)
-      const code = `{
-  id: "${snippetObj.id}",
-  title: ${JSON.stringify(snippetObj.title)},
-  channel: ${JSON.stringify(snippetObj.channel)},
-  duration: ${JSON.stringify(snippetObj.duration)},
-  views: "",
-  uploadTime: "",
-  thumbnail: ${JSON.stringify(snippetObj.thumbnail)},
-  url: ${JSON.stringify(snippetObj.url)},
-  description: ${JSON.stringify(snippetObj.description)},
-  verified: true,
-  processedData: ${JSON.stringify(snippetObj.processedData, null, 2)}
-}`
-      await navigator.clipboard.writeText(code)
-      alert('✅ 추천 스니펫을 클립보드에 복사했어요. recommendedVideos.ts 배열에 붙여넣고 저장하면 홈에 노출됩니다.')
-    } catch (e) {
-      alert('추천 추가 준비 중 오류가 발생했습니다.')
-    }
-  }
 
   const timeToSeconds = (timeStr: string | number): number => {
     // 숫자인 경우 바로 반환
@@ -361,17 +281,46 @@ const ProcessedVisualInterpretation: React.FC = () => {
     return adjusted < 0 ? 0 : adjusted
   }
 
-  // 현재 재생 시간 기반으로 현재 세그먼트 찾기
+  // 현재 재생 시간 기반으로 현재 세그먼트 찾기 (개선된 버전)
   const findCurrentSegmentIndex = (currentTimeInSeconds: number): number => {
     for (let i = 0; i < segments.length; i++) {
       const startTime = timeToSeconds(segments[i].start_time);
       const endTime = timeToSeconds(segments[i].end_time);
       
-      if (currentTimeInSeconds >= startTime && currentTimeInSeconds <= endTime) {
+      // 오프셋 적용된 시간으로 비교
+      const adjustedStartTime = startTime + syncOffset;
+      const adjustedEndTime = endTime + syncOffset;
+      
+      if (currentTimeInSeconds >= adjustedStartTime && currentTimeInSeconds <= adjustedEndTime) {
         return i;
       }
     }
-    return -1;
+    
+    // 정확히 일치하는 세그먼트가 없으면 가장 가까운 세그먼트 찾기
+    let closestIndex = -1;
+    let minDistance = Infinity;
+    
+    for (let i = 0; i < segments.length; i++) {
+      const startTime = timeToSeconds(segments[i].start_time) + syncOffset;
+      const endTime = timeToSeconds(segments[i].end_time) + syncOffset;
+      
+      // 현재 시간이 세그먼트 범위에 가장 가까운지 확인
+      if (currentTimeInSeconds < startTime) {
+        const distance = startTime - currentTimeInSeconds;
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestIndex = i;
+        }
+      } else if (currentTimeInSeconds > endTime) {
+        const distance = currentTimeInSeconds - endTime;
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestIndex = i;
+        }
+      }
+    }
+    
+    return closestIndex;
   };
 
   // 문장이 완전한지 확인하는 함수 (중국어 문장 부호로 판단)
@@ -574,6 +523,7 @@ JSON 형식으로만 응답:
         
         const segmentIndex = findCurrentSegmentIndex(time);
         if (segmentIndex !== -1 && segmentIndex !== currentScript) {
+          console.log(`🔄 현재 세그먼트 변경: ${currentScript} → ${segmentIndex} (시간: ${time.toFixed(2)}초)`);
           setCurrentScript(segmentIndex);
         }
         
@@ -1138,16 +1088,7 @@ JSON 형식으로만 응답:
                         <button onClick={() => { setIsPlayingModelAudio(!isPlayingModelAudio); if (!isPlayingModelAudio) speakKorean(segments[practiceSegmentIndex].translation_suggestion) }} className={`px-3 py-1 rounded text-xs ${isPlayingModelAudio ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-blue-100 text-blue-600 hover:bg-blue-200'}`}>{isPlayingModelAudio ? '⏸️ 일시정지' : '🔊 듣기'}</button>
                       </div>
                       <p className="text-gray-800 leading-relaxed mb-3 script-text">{segments[practiceSegmentIndex].translation_suggestion}</p>
-                      {!!segments[practiceSegmentIndex].keywords?.length && (
-                        <div className="mb-3">
-                          <div className="text-sm font-medium text-blue-700 mb-2">🔑 핵심 키워드:</div>
-                          <div className="flex flex-wrap gap-2">
-                            {segments[practiceSegmentIndex].keywords.map((kw, i) => (
-                              <span key={i} className="bg-yellow-100 text-yellow-800 text-sm px-3 py-1 rounded-full font-medium">{kw}</span>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+
                     </div>
                   )}
                   
@@ -1232,11 +1173,7 @@ JSON 형식으로만 응답:
                 </div>
                 </div>
 
-                {/* 추천에 올리기 */}
-                <div className="pt-4 border-t">
-                  <button onClick={handleAddToRecommended} className="w-full py-3 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg">📌 추천에 올리기</button>
-                  <p className="text-xs text-gray-500 mt-2">클릭 시 현재 처리 결과를 추천 스니펫으로 변환해 클립보드에 복사합니다. `src/data/recommendedVideos.ts` 배열에 붙여넣고 저장하세요.</p>
-                </div>
+
               </div>
 
               {/* 연습 상태 */}
@@ -1255,16 +1192,24 @@ JSON 형식으로만 응답:
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">📝 자막 스크립트</h3>
                 <div ref={scriptContainerRef} className="h-[28rem] overflow-y-auto border-2 border-gray-300 rounded-lg p-4 bg-gray-50 overscroll-contain">
                   {segments.map((segment, index) => (
-                    <div key={segment.id} onClick={() => { setPracticeMode('listen'); setPracticeSegmentIndex(index); setCurrentScript(index); setAccumulatedText(''); setCurrentText(''); setRecordingTime(0); if (player) { const startTime = getTimeWithOffset(segment.start_time || segment.start); setLastAutoDetectionEnabledTime(Date.now()); player.seekTo(startTime); player.playVideo() } }} className={`p-3 mb-2 rounded cursor-pointer transition-all ${currentScript === index ? 'bg-blue-100 border-l-4 border-blue-500 shadow-md scale-105' : 'hover:bg-gray-200'}`}>
+                    <div key={segment.id} onClick={() => { 
+                      setPracticeMode('listen'); 
+                      setPracticeSegmentIndex(index); 
+                      setCurrentScript(index); 
+                      setAccumulatedText(''); 
+                      setCurrentText(''); 
+                      setRecordingTime(0); 
+                      setEvaluationResult(null); // 평가 결과도 초기화
+                      if (player) { 
+                        const startTime = getTimeWithOffset(segment.start_time || segment.start); 
+                        setLastAutoDetectionEnabledTime(Date.now()); 
+                        player.seekTo(startTime); 
+                        player.playVideo() 
+                      } 
+                    }} className={`p-3 mb-2 rounded cursor-pointer transition-all ${currentScript === index ? 'bg-blue-100 border-l-4 border-blue-500 shadow-md scale-105' : 'hover:bg-gray-200'}`}>
                       <div className="text-gray-600 text-xs mb-1">[{segment.start_time || `${Math.floor((segment.start || 0) / 60)}:${((segment.start || 0) % 60).toFixed(0).padStart(2, '0')}`} - {segment.end_time || `${Math.floor((segment.end || 0) / 60)}:${((segment.end || 0) % 60).toFixed(0).padStart(2, '0')}`}]</div>
                       <div className="text-gray-900 font-medium text-sm segment-text">{segment.original_text}</div>
-                      {segment.keywords && segment.keywords.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {segment.keywords.slice(0, 3).map((keyword, kIndex) => (
-                            <span key={kIndex} className="bg-yellow-100 text-yellow-800 text-xs px-2 py-1 rounded-full">{keyword}</span>
-                          ))}
-                        </div>
-                      )}
+
                     </div>
                   ))}
                 </div>

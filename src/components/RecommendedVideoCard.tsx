@@ -97,14 +97,14 @@ export function RecommendedVideoCard({ video, onClick, isFavorite = false, onTog
         <div className="flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
           <button 
             onClick={(e) => {
-              console.log('💖 즐겨찾기 하트 버튼 클릭됨!')
+              // 즐겨찾기 토글 처리
               console.log('📋 비디오 정보:', {
                 id: video.id,
                 title: video.title,
                 isFavorite: isFavorite
               })
               e.stopPropagation()
-              console.log('🔄 onToggleFavorite 함수 호출 중...')
+              // onToggleFavorite 함수 호출
               onToggleFavorite()
             }}
             className={`p-1 rounded transition-colors ${

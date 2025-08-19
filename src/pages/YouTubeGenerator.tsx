@@ -7,11 +7,13 @@ import type { VideoInfo } from '../types/youtube.types'
 import { useAuth } from '../contexts/AuthContext'
 import { UserProfile } from '../components/UserProfile'
 import { LoginModal } from '../components/LoginModal'
-import { recommendedVideos } from '../data/recommendedVideos'
+import { recommendedVideos, sortVideosByDifficulty } from '../data/recommendedVideos'
 import { RecommendedVideoCard } from '../components/RecommendedVideoCard'
 import { useAzureProcessing } from '../services/azureProcessingService'
 import { addToFavorites, removeFromFavorites, getFavorites } from '../services/favoritesService'
 import { FavoritesModal } from '../components/FavoritesModal'
+import { Tour } from '../components/UI/Tour'
+import CaptionLanguageModal from '../components/CaptionLanguageModal'
 
 const styles = {
   background: 'bg-gradient-to-br from-sky-50 to-blue-100',
@@ -38,12 +40,62 @@ export default function YouTubeGenerator() {
   const [showFavoritesModal, setShowFavoritesModal] = useState(false)
   const [favoriteIds, setFavoriteIds] = useState<string[]>([])
   const [isLoggedIn, setIsLoggedIn] = useState(false)
+  
+  // 온보딩 투어 상태
+  const [showTour, setShowTour] = useState(() => {
+    return localStorage.getItem('youtube-tour-done') !== '1'
+  })
   const derivedId = extractVideoId(url || '')
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
   const playerRef = useRef<any>(null)
   const CAPTION_LIMIT_SECONDS = 40 * 60
   const NO_CAPTION_LIMIT_SECONDS = 25 * 60
   const [hasCaptions, setHasCaptions] = useState<boolean | null>(null)
+  const [showCaptionModal, setShowCaptionModal] = useState(false)
+  const [availableCaptions, setAvailableCaptions] = useState<{
+    manual: string[];
+    automatic: string[];
+  }>({ manual: [], automatic: [] })
+
+  // 온보딩 투어 단계 정의
+  const tourSteps = [
+    {
+      id: 'step1',
+      title: 'YouTube URL 입력',
+      description: '분석하고 싶은 YouTube 영상의 URL을 입력하세요. 지원 형식: https://www.youtube.com/watch?v=ID, https://youtu.be/ID 또는 11자리 ID',
+      targetSelector: '[data-tour="url-input"]',
+      padding: 8,
+    },
+    {
+      id: 'step2',
+      title: '주의사항',
+      description: '자막이 있는 영상은 40분, 자막이 없는 영상은 25분까지 처리 가능합니다. 처리 시간은 영상 길이에 따라 달라질 수 있습니다.',
+      targetSelector: '[data-tour="notice"]',
+      padding: 8,
+    },
+    {
+      id: 'step3',
+      title: '추천 영상',
+      description: '미리 준비된 추천 영상들을 바로 시도해보세요. 별도의 URL 입력 없이 바로 분석을 시작할 수 있습니다.',
+      targetSelector: '[data-tour="recommended"]',
+      padding: 16,
+    },
+    {
+      id: 'step4',
+      title: '로그인 및 즐겨찾기',
+      description: '로그인하면 원하는 영상을 즐겨찾기에 추가할 수 있습니다. 즐겨찾기한 영상은 언제든지 빠르게 접근할 수 있어요!',
+      targetSelector: '[data-tour="login"]',
+      padding: 8,
+    },
+  ]
+
+  // 온보딩 투어 닫기 함수
+  const closeTour = (opts?: { dontShowAgain?: boolean }) => {
+    if (opts?.dontShowAgain) {
+      localStorage.setItem('youtube-tour-done', '1')
+    }
+    setShowTour(false)
+  }
 
   const formatDuration = (totalSeconds: number): string => {
     if (!totalSeconds || totalSeconds < 0) return '확인 중...'
@@ -67,20 +119,15 @@ export default function YouTubeGenerator() {
         console.log('✅ currentUser 발견, 로그인 상태로 설정')
         setIsLoggedIn(true)
         
-        const userId = localStorage.getItem('userId')
-        if (userId) {
-          try {
-            console.log('🌐 서버에서 즐겨찾기 목록 가져오는 중...')
-            const favorites = await getFavorites(userId)
-            console.log('📋 서버에서 받은 즐겨찾기:', favorites)
-            console.log('📋 추천 영상 ID 목록:', recommendedVideos.map(v => ({ id: v.id, title: v.title })))
-            setFavoriteIds(favorites)
-          } catch (error) {
-            console.error('❌ 즐겨찾기 로딩 실패:', error)
-            setFavoriteIds([])
-          }
-        } else {
-          console.log('⚠️ currentUser는 있지만 userId가 없음')
+        // Firebase Auth의 UID 사용
+        const firebaseUserId = currentUser.uid
+        console.log('📋 Firebase Auth UID:', firebaseUserId)
+        
+        try {
+          const favorites = await getFavorites(firebaseUserId)
+          setFavoriteIds(favorites)
+        } catch (error) {
+          console.error('❌ 즐겨찾기 로딩 실패:', error)
           setFavoriteIds([])
         }
       } else {
@@ -94,44 +141,39 @@ export default function YouTubeGenerator() {
 
 
 
-  // 즐겨찾기 토글 (로그인 기반)
+  // 즐겨찾기 토글 (Firebase Auth 기반)
   const handleToggleFavorite = async (videoId: string) => {
-    console.log('🎯 즐겨찾기 토글 시작:', videoId)
+    // 즐겨찾기 토글 시작
     
-    const userId = localStorage.getItem('userId')
-    console.log('📋 userId:', userId)
-    
-    if (!userId) {
-      console.log('❌ userId 없음, 로그인 모달 표시')
+    if (!currentUser) {
+      console.log('❌ 로그인되지 않음, 로그인 모달 표시')
       setShowLoginModal(true)
       return
     }
     
-    console.log('📊 현재 favoriteIds:', favoriteIds)
-    console.log('🔍 videoId가 favoriteIds에 포함되어 있나?', favoriteIds.includes(videoId))
+    const firebaseUserId = currentUser.uid
+    console.log('📋 Firebase Auth UID:', firebaseUserId)
+    
+            // 즐겨찾기 제거 처리
     
     try {
       if (favoriteIds.includes(videoId)) {
         // 즐겨찾기 제거
-        console.log('🗑️ 즐겨찾기 제거 시도:', videoId)
-        const success = await removeFromFavorites(userId, videoId)
-        console.log('✅ 즐겨찾기 제거 결과:', success)
+        const success = await removeFromFavorites(firebaseUserId, videoId)
         if (success) {
           setFavoriteIds(prev => {
             const newIds = prev.filter(id => id !== videoId)
-            console.log('🔄 favoriteIds 업데이트 (제거):', newIds)
+            // favoriteIds 업데이트 (제거)
             return newIds
           })
         }
       } else {
         // 즐겨찾기 추가
-        console.log('➕ 즐겨찾기 추가 시도:', videoId)
-        const success = await addToFavorites(userId, videoId)
-        console.log('✅ 즐겨찾기 추가 결과:', success)
+        const success = await addToFavorites(firebaseUserId, videoId)
         if (success) {
           setFavoriteIds(prev => {
             const newIds = [...prev, videoId]
-            console.log('🔄 favoriteIds 업데이트 (추가):', newIds)
+            // favoriteIds 업데이트 (추가)
             return newIds
           })
         }
@@ -182,11 +224,39 @@ export default function YouTubeGenerator() {
     try {
       // 자막 존재 여부 확인(백엔드 경량 체크)
       let detectedCaptions = false
+      let captionResult = null
       try {
         const chk = await checkCaptions(url)
         detectedCaptions = !!chk?.hasCaptions
+        captionResult = chk
+        console.log('🔍 자막 감지 결과:', chk)
       } catch {}
       setHasCaptions(detectedCaptions)
+      
+      // 여러 언어가 감지되면 언어 선택 모달 표시
+      console.log('🔍 captionResult 구조:', captionResult)
+      console.log('🔍 hasCaptions:', captionResult?.hasCaptions)
+      console.log('🔍 availableCaptions:', captionResult?.availableCaptions)
+      
+      if (captionResult?.hasCaptions && captionResult?.availableCaptions) {
+        const allLanguages = [
+          ...captionResult.availableCaptions.manual,
+          ...captionResult.availableCaptions.automatic
+        ]
+        console.log('🔍 전체 언어 목록:', allLanguages)
+        console.log('🔍 언어 개수:', allLanguages.length)
+        
+        if (allLanguages.length > 1) {
+          console.log('🌍 여러 언어 감지, 언어 선택 모달 표시')
+          setAvailableCaptions(captionResult.availableCaptions)
+          setShowCaptionModal(true)
+        } else {
+          console.log('🌍 단일 언어 또는 언어 없음, 모달 표시 안함')
+        }
+      } else {
+        console.log('🌍 자막 정보 없음, 모달 표시 안함')
+      }
+      
       setVerified(true)
     } catch (err: any) {
       setError(err?.message || '영상 확인에 실패했습니다')
@@ -255,7 +325,7 @@ export default function YouTubeGenerator() {
   return (
     <div className={`${styles.background} min-h-screen animate-fadeIn`}>
       {/* 네비게이션 헤더 */}
-      <div className="absolute top-0 right-0 p-6 z-10 flex items-center gap-3">
+      <div data-tour="login" className="absolute top-0 right-0 p-6 z-10 flex items-center gap-3">
         {/* 기존 로그인 버튼 */}
         {currentUser ? (
           <UserProfile />
@@ -275,22 +345,7 @@ export default function YouTubeGenerator() {
         {isLoggedIn && (
           <button
             onClick={() => {
-              console.log('🎯 즐겨찾기 버튼 클릭됨!')
-              console.log('📊 현재 상태:')
-              console.log('  - showFavoritesModal:', showFavoritesModal)
-              console.log('  - isLoggedIn:', isLoggedIn)
-              console.log('  - currentUser:', currentUser)
-              console.log('  - favoriteIds:', favoriteIds)
-              console.log('  - localStorage userId:', localStorage.getItem('userId'))
-              
-              // 상태 변경 전후 로그
-              console.log('🔄 showFavoritesModal을 true로 설정 중...')
               setShowFavoritesModal(true)
-              
-              // 다음 렌더링에서 상태 확인
-              setTimeout(() => {
-                console.log('⏰ 100ms 후 showFavoritesModal 상태:', showFavoritesModal)
-              }, 100)
             }}
             className="px-3 py-2 rounded-lg bg-pink-500 text-white hover:bg-pink-600 shadow-md focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-offset-2 transition-all duration-200 flex items-center gap-2 text-sm"
             title="즐겨찾기 목록 보기"
@@ -321,7 +376,7 @@ export default function YouTubeGenerator() {
             <div className={styles.card}>
             <h2 className="text-2xl font-bold text-gray-900 mb-6"> YouTube URL 입력</h2>
             <form onSubmit={handleSubmit} className="space-y-6">
-              <div>
+              <div data-tour="url-input">
                 <label className="block text-sm font-medium text-gray-700 mb-2">YouTube 영상 URL</label>
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <input
@@ -332,6 +387,7 @@ export default function YouTubeGenerator() {
                       setVerified(false)
                       setVideoId('')
                       setError('')
+                      setShowCaptionModal(false)
                     }}
                     placeholder="https://www.youtube.com/watch?v=..."
                     className={styles.input}
@@ -364,7 +420,7 @@ export default function YouTubeGenerator() {
                 )}
               </div>
 
-              <div className="bg-blue-50 rounded-lg p-4">
+              <div data-tour="notice" className="bg-blue-50 rounded-lg p-4">
                 <h3 className="font-semibold text-blue-900 mb-2"> 읽어주세요!</h3>
                 <div className="text-sm text-blue-800 space-y-2">
                   <div>
@@ -448,13 +504,16 @@ export default function YouTubeGenerator() {
                 </div>
 
                 <div className="mt-6 flex flex-col sm:flex-row gap-3">
-                  <button
-                    className={styles.button}
-                    disabled={!!(videoInfo?.durationSeconds && hasCaptions != null && videoInfo.durationSeconds > (hasCaptions ? CAPTION_LIMIT_SECONDS : NO_CAPTION_LIMIT_SECONDS))}
-                    onClick={() => navigate('/processing')}
-                  >
-                    통역 연습 생성 시작
-                  </button>
+                  {/* 언어 선택 모달이 표시될 때는 버튼 숨김 */}
+                  {!(hasCaptions && availableCaptions.manual.length + availableCaptions.automatic.length > 1) && (
+                    <button
+                      className={styles.button}
+                      disabled={!!(videoInfo?.durationSeconds && hasCaptions != null && videoInfo.durationSeconds > (hasCaptions ? CAPTION_LIMIT_SECONDS : NO_CAPTION_LIMIT_SECONDS))}
+                      onClick={() => navigate('/processing')}
+                    >
+                      통역 연습 생성 시작
+                    </button>
+                  )}
                   <button
                     className="px-6 py-3 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
                     onClick={() => {
@@ -462,6 +521,7 @@ export default function YouTubeGenerator() {
                       setUrl('')
                       setVideoId('')
                       setError('')
+                      setShowCaptionModal(false)
                     }}
                   >
                     다른 영상 선택
@@ -489,8 +549,8 @@ export default function YouTubeGenerator() {
                 </p>
               </div>
               
-              <div className="space-y-2 max-h-[80vh] overflow-y-auto">
-                                  {recommendedVideos.map((video) => (
+              <div data-tour="recommended" className="space-y-2 max-h-[80vh] overflow-y-auto">
+                {sortVideosByDifficulty(recommendedVideos, 'desc').map((video) => (
                     <RecommendedVideoCard
                       key={video.id}
                       video={video}
@@ -564,6 +624,27 @@ export default function YouTubeGenerator() {
         onClose={() => setShowFavoritesModal(false)}
         favoriteIds={favoriteIds}
         onToggleFavorite={handleToggleFavorite}
+      />
+
+      {/* 언어 선택 모달 */}
+      <CaptionLanguageModal
+        isOpen={showCaptionModal}
+        onClose={() => setShowCaptionModal(false)}
+        onSelectLanguage={(language, type) => {
+          console.log('🌍 선택된 언어:', language, type)
+          localStorage.setItem('selectedCaptionLanguage', language)
+          localStorage.setItem('selectedCaptionType', type)
+          setShowCaptionModal(false)
+          navigate('/processing')
+        }}
+        availableCaptions={availableCaptions}
+      />
+
+      {/* 온보딩 투어 */}
+      <Tour 
+        steps={tourSteps} 
+        visible={showTour} 
+        onClose={closeTour} 
       />
     </div>
   )

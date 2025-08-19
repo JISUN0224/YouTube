@@ -484,7 +484,7 @@ async function transcribeWithAzure(audioUrl, previewSeconds) {
 
     // 모든 청크 결과를 병합
     console.log('🔗 청크 결과 병합 중:', allResults.length, '개 청크');
-    const mergedResult = mergeChunkResults(allResults);
+    const mergedResult = mergeChunkResultsFixed(allResults);
     // 실제 처리한 길이로 설정하여 테스트 모드(30초) 시 과도한 꼬리 연장을 방지
     mergedResult._totalDurationSec = typeof effectiveTotalDuration === 'number' ? effectiveTotalDuration : (typeof durationInfo === 'number' ? durationInfo : undefined);
     
@@ -874,75 +874,231 @@ async function processChunkWithAzure(wavBuffer, chunkStartTime, chunkDuration) {
   return await processChunkWithAzureFixed(wavBuffer, chunkStartTime);
 }
 
-// 청크 결과들을 병합하는 함수 (드리프트 보정 적용)
+// 청크 결과들을 병합하는 함수 (시간 순서 보정 강화)
 function mergeChunkResults(chunkResults) {
   try {
-    console.log('🔗 드리프트 보정 병합 시작, 유효한 청크 수:', chunkResults.filter(r => r).length);
+    console.log('🔗 청크 병합 시작, 유효한 청크 수:', chunkResults.filter(r => r).length);
     
     const validChunks = chunkResults.filter(chunk => chunk && chunk.NBest && chunk.NBest[0]);
     
     if (validChunks.length === 0) {
       console.warn('⚠️ 유효한 청크가 없음');
-      return { DisplayText: '', NBest: [], RecognitionStatus: 'NoMatch' };
+      return {
+        DisplayText: '',
+        NBest: [],
+        RecognitionStatus: 'NoMatch'
+      };
     }
 
-    // 1. 드리프트 분석 및 보정 계산
-    const driftAnalysis = analyzeDriftPattern(validChunks);
-    console.log('📊 드리프트 분석:', driftAnalysis);
-    
-    // 2. 모든 단어 수집 (드리프트 보정 전)
+    // 1) 청크별로 시간 정보 출력 (디버깅)
+    for (let i = 0; i < validChunks.length; i++) {
+      const chunk = validChunks[i];
+      const meta = chunk._chunk;
+      const words = chunk?.NBest?.[0]?.Words || [];
+      if (words.length > 0) {
+        const firstWord = words[0];
+        const lastWord = words[words.length - 1];
+        const firstTime = (firstWord.Offset || 0) / 10_000_000;
+        const lastTime = ((lastWord.Offset || 0) + (lastWord.Duration || 0)) / 10_000_000;
+        console.log(`📍 청크 ${i + 1}: 예상(${meta?.start?.toFixed(1)}~${meta?.end?.toFixed(1)}초) vs 실제(${firstTime.toFixed(1)}~${lastTime.toFixed(1)}초) - "${words.slice(0, 3).map(w => w.Word || '').join('')}..."`);
+      }
+    }
+
+    // 2) 모든 단어 수집 후 시간 기준 정렬
     let allWords = [];
+    
     for (const chunk of validChunks) {
       if (chunk.NBest && chunk.NBest[0] && chunk.NBest[0].Words) {
         for (const word of chunk.NBest[0].Words) {
           allWords.push({
             ...word,
-            _chunkId: validChunks.indexOf(chunk),
-            _originalOffset: word.Offset // 원본 오프셋 보존
+            _chunkId: validChunks.indexOf(chunk) // 어느 청크에서 왔는지 기록
           });
         }
       }
     }
     
-    console.log(`📝 수집된 원본 단어: ${allWords.length}개`);
+    // 3) 오프셋 기준으로 엄격하게 정렬
+    allWords.sort((a, b) => (a.Offset || 0) - (b.Offset || 0));
     
-    // 3. 드리프트 보정 적용
-    const correctedWords = applyDriftCorrection(allWords, driftAnalysis);
-    console.log(`🔧 드리프트 보정 완료: ${correctedWords.length}개 단어`);
+    // 4) 중복 제거 (시간과 텍스트 모두 고려)
+    const cleanWords = [];
+    for (let i = 0; i < allWords.length; i++) {
+      const current = allWords[i];
+      const previous = cleanWords[cleanWords.length - 1];
+      
+      const isDuplicate = previous && 
+        (current.Word || '') === (previous.Word || '') &&
+        Math.abs((current.Offset || 0) - (previous.Offset || 0)) <= 500_000; // 50ms 이내
+      
+      if (!isDuplicate) {
+        cleanWords.push(current);
+      } else {
+        console.log(`🔄 중복 제거: "${current.Word}" at ${((current.Offset || 0) / 10_000_000).toFixed(2)}초`);
+      }
+    }
     
-    // 4. 시간 순서 정렬 및 중복 제거
-    correctedWords.sort((a, b) => (a.Offset || 0) - (b.Offset || 0));
-    const cleanWords = removeDuplicateWords(correctedWords);
+    // 5) 시간 연속성 검증 및 보정 (+ 청크 간 역행 방지)
+    const correctedWords = [];
+    let runningLastEnd = 0;
+    for (let i = 0; i < cleanWords.length; i++) {
+      const word = { ...cleanWords[i] };
+      
+      // 이전 단어와의 시간 간격 체크
+      if (i > 0) {
+        const prevWord = correctedWords[i - 1];
+        const prevEnd = (prevWord.Offset || 0) + (prevWord.Duration || 0);
+        const currentStart = word.Offset || 0;
+        const gap = (currentStart - prevEnd) / 10_000_000;
+        
+        // 큰 시간 점프나 역순이 발견되면 경고
+        if (gap > 5.0) {
+          console.warn(`⚠️ 큰 시간 점프 감지: ${(prevEnd/10_000_000).toFixed(2)}초 → ${(currentStart/10_000_000).toFixed(2)}초 (${gap.toFixed(2)}초 점프)`);
+        } else if (gap < -0.5) {
+          console.warn(`⚠️ 시간 역순 감지: ${(prevEnd/10_000_000).toFixed(2)}초 → ${(currentStart/10_000_000).toFixed(2)}초`);
+          // 역순인 경우 이전 단어 바로 뒤로 조정
+          word.Offset = prevEnd;
+        }
+      }
+
+      // 청크 경계로 인한 앞당김 보정: 현재 단어 시작이 누적 종료보다 300ms 이상 앞서 있으면 당겨줌
+      const NEG_GAP_CLAMP = 300_000; // 300ms
+      const wStart = word.Offset || 0;
+      if (wStart < runningLastEnd - NEG_GAP_CLAMP) {
+        const delta = (runningLastEnd + 50_000) - wStart; // 50ms 여유
+        word.Offset = wStart + delta;
+      }
+      const wEnd = (word.Offset || 0) + (word.Duration || 0);
+      runningLastEnd = Math.max(runningLastEnd, wEnd);
+      
+      correctedWords.push(word);
+    }
     
-    // 5. 연속성 보장
-    const smoothedWords = ensureContinuity(cleanWords);
+    console.log(`📝 병합 결과: ${allWords.length} → ${cleanWords.length} → ${correctedWords.length} 단어`);
     
-    // 6. 텍스트 재구성
-    const allDisplayText = smoothedWords.map(w => w.Word || '').join('');
-    const finalText = performAdvancedTextCleaning(allDisplayText);
+    // 6) 전체 텍스트 재구성 및 문장 단위 중복 제거
+    let rawDisplayText = correctedWords.map(w => w.Word || '').join('');
     
-    console.log(`✅ 드리프트 보정 병합 완료: ${finalText.length}자`);
+    // 문장 단위 중복 제거 (특히 청크 오버랩으로 인한 중복)
+    console.log('🔍 중복 제거 전 원본 텍스트:', rawDisplayText.slice(0, 200) + '...');
     
-    return {
-      DisplayText: finalText,
+    // 1) 먼저 중국어 구두점으로 문장 분할
+    const sentences = rawDisplayText
+      .split(/(?<=[。！？；])/)
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+    
+    console.log('📝 분할된 문장 수:', sentences.length);
+    
+    const uniqueSentences = [];
+    const removedDuplicates = [];
+    
+    for (const sentence of sentences) {
+              const normalized = sentence.replace(/\s/g, '').trim(); // 구두점 제거하지 않음
+      if (normalized.length === 0) continue;
+      
+      // 이미 있는 문장과 유사도 체크
+      let isDuplicate = false;
+      let duplicateMatch = '';
+      let replaceExisting = false;
+      let replaceIndex = -1;
+      
+      for (let i = 0; i < uniqueSentences.length; i++) {
+        const existing = uniqueSentences[i];
+        const existingNorm = existing.replace(/\s/g, '').trim(); // 구두점 제거하지 않음
+        if (existingNorm.length === 0) continue;
+        
+        // 방법 1: 포함 관계 체크 (70% 이상)
+        const shorter = normalized.length < existingNorm.length ? normalized : existingNorm;
+        const longer = normalized.length >= existingNorm.length ? normalized : existingNorm;
+        const inclusionSim = longer.includes(shorter) ? (shorter.length / longer.length) : 0;
+        
+        // 방법 2: 편집 거리 기반 유사도 (간단 버전)
+        const maxLen = Math.max(normalized.length, existingNorm.length);
+        const minLen = Math.min(normalized.length, existingNorm.length);
+        const lengthSim = minLen / maxLen;
+        
+        // 방법 3: 특정 패턴 체크 ("球，" 같은 이상한 prefix 제거 후 비교)
+        const cleanCurrent = normalized.replace(/^[球。]+/, '');
+        const cleanExisting = existingNorm.replace(/^[球。]+/, '');
+        const cleanSim = cleanExisting.length > 0 && cleanCurrent.length > 0 && 
+          (cleanExisting.includes(cleanCurrent) || cleanCurrent.includes(cleanExisting)) ?
+          Math.min(cleanCurrent.length, cleanExisting.length) / Math.max(cleanCurrent.length, cleanExisting.length) : 0;
+        
+        if (inclusionSim >= 0.7 || (lengthSim >= 0.8 && longer.includes(shorter.slice(0, Math.floor(shorter.length * 0.7)))) || cleanSim >= 0.9) {
+          isDuplicate = true;
+          duplicateMatch = existing.slice(0, 30);
+          
+          // 완성도 비교: 새 문장이 기존 문장보다 더 완전한지 체크
+          const currentComplete = sentence.includes('。') || sentence.includes('！') || sentence.includes('？');
+          const existingComplete = existing.includes('。') || existing.includes('！') || existing.includes('？');
+          const currentLonger = sentence.length > existing.length;
+          const currentCleaner = !sentence.match(/^[球，、。]/) && existing.match(/^[球，、。]/);
+          
+          // 새 문장이 더 완전하거나 깨끗하면 기존 문장을 대체
+          if ((currentComplete && !existingComplete) || 
+              (currentComplete === existingComplete && currentLonger) ||
+              currentCleaner) {
+            replaceExisting = true;
+            replaceIndex = i;
+            console.log(`🔄 더 완전한 문장으로 교체: "${existing.slice(0, 30)}..." → "${sentence.slice(0, 30)}..."`);
+          } else {
+            console.log(`🔄 문장 중복 제거: "${sentence.slice(0, 30)}..." → 유지: "${duplicateMatch}..."`);
+          }
+          break;
+        }
+      }
+      
+      if (!isDuplicate) {
+        uniqueSentences.push(sentence);
+      } else if (replaceExisting) {
+        // 더 완전한 문장으로 교체
+        uniqueSentences[replaceIndex] = sentence;
+        removedDuplicates.push({
+          removed: duplicateMatch,
+          replacedWith: sentence.slice(0, 30)
+        });
+      } else {
+        // 기존 문장 유지, 새 문장 제거
+        removedDuplicates.push({
+          removed: sentence.slice(0, 30),
+          similarTo: duplicateMatch
+        });
+      }
+    }
+    
+    console.log('✅ 중복 제거 완료:', sentences.length, '→', uniqueSentences.length, '문장');
+    if (removedDuplicates.length > 0) {
+      console.log('🗑️ 제거된 중복:', removedDuplicates.length, '개');
+    }
+    
+    const allDisplayText = uniqueSentences.join('');
+    
+    // 병합된 결과 구성
+    const mergedResult = {
+      DisplayText: allDisplayText,
       NBest: [{
-        Display: finalText,
-        Lexical: finalText,
-        Words: smoothedWords.map(w => {
-          const { _chunkId, _originalOffset, ...cleanWord } = w;
+        Display: allDisplayText,
+        Lexical: allDisplayText,
+        Words: correctedWords.map(w => {
+          const { _chunkId, ...cleanWord } = w; // _chunkId 제거
           return cleanWord;
         }),
         Confidence: validChunks.length > 0 ? 
           (validChunks.reduce((sum, chunk) => sum + (chunk.NBest[0].Confidence || 0.9), 0) / validChunks.length) : 0.9
       }],
-      RecognitionStatus: 'Success',
-      _driftCorrected: true,
-      _driftInfo: driftAnalysis
+      RecognitionStatus: 'Success'
     };
     
+    return mergedResult;
+    
   } catch (error) {
-    console.error('드리프트 보정 병합 오류:', error);
-    return { DisplayText: '', NBest: [], RecognitionStatus: 'Failed' };
+    console.error('청크 병합 오류:', error);
+    return {
+      DisplayText: '',
+      NBest: [],
+      RecognitionStatus: 'Failed'
+    };
   }
 }
 
@@ -1058,10 +1214,10 @@ function generateWordsFromText(text, chunkStartTime) {
   return words;
 }
 
-// 3. 수정된 청크 병합 함수 - 드리프트 보정 적용
+// 3. 수정된 청크 병합 함수
 function mergeChunkResultsFixed(chunkResults) {
   try {
-    console.log('🔗 청크 병합 시작 (드리프트 보정 적용), 유효한 청크 수:', chunkResults.filter(r => r).length);
+    console.log('🔗 청크 병합 시작 (SDK 호환), 유효한 청크 수:', chunkResults.filter(r => r).length);
     
     const validChunks = chunkResults.filter(chunk => {
       if (!chunk) return false;
@@ -1086,8 +1242,97 @@ function mergeChunkResultsFixed(chunkResults) {
       };
     }
 
-    // 🎯 드리프트 보정 시스템 적용
-    return mergeChunkResultsWithDriftCorrection(validChunks);
+    console.log(`📋 유효한 청크 형식 분석:`);
+    validChunks.forEach((chunk, i) => {
+      const type = Array.isArray(chunk) ? 'array' : typeof chunk;
+      console.log(`   청크 ${i + 1}: ${type} - ${JSON.stringify(chunk).slice(0, 50)}...`);
+    });
+
+    // 모든 청크의 텍스트 수집 (개선된 버전)
+    let allTexts = [];
+    let allWords = [];
+    
+    for (let i = 0; i < validChunks.length; i++) {
+      const chunk = validChunks[i];
+      let chunkTexts = [];
+      let chunkWords = [];
+      
+      // REST API 형식
+      if (chunk.NBest && chunk.NBest[0]) {
+        const text = chunk.NBest[0].Display || chunk.NBest[0].Lexical || chunk.DisplayText || '';
+        if (text.trim()) {
+          chunkTexts.push(text.trim());
+        }
+        chunkWords = chunk.NBest[0].Words || [];
+      }
+      // SDK 문자열 형식
+      else if (typeof chunk === 'string') {
+        if (chunk.trim()) {
+          chunkTexts.push(chunk.trim());
+        }
+        chunkWords = generateWordsFromText(chunk, i * 55);
+      }
+      // SDK 배열 형식
+      else if (Array.isArray(chunk)) {
+        const texts = chunk.filter(item => typeof item === 'string' && item.trim());
+        if (texts.length > 0) {
+          chunkTexts.push(...texts);
+        }
+        chunkWords = generateWordsFromText(texts.join(' '), i * 55);
+      }
+      // SDK 객체 형식
+      else if (typeof chunk === 'object') {
+        const text = chunk.text || chunk.DisplayText || chunk.result || '';
+        if (text.trim()) {
+          chunkTexts.push(text.trim());
+        }
+        chunkWords = chunk.words || generateWordsFromText(text, i * 55);
+      }
+      
+      // 청크의 모든 텍스트를 추가
+      if (chunkTexts.length > 0) {
+        allTexts.push(...chunkTexts);
+        console.log(`✅ 청크 ${i + 1} 텍스트들 (${chunkTexts.length}개):`);
+        chunkTexts.forEach((text, idx) => {
+          console.log(`   ${idx + 1}. "${text.slice(0, 50)}..."`);
+          console.log(`   📊 구두점: ${(text.match(/[。，！？；]/g) || []).length}개`);
+        });
+      }
+      
+      if (chunkWords.length > 0) {
+        allWords.push(...chunkWords);
+      }
+    }
+    
+    // 전체 텍스트 결합
+    const combinedText = allTexts.join(' ');
+    
+    console.log(`📝 병합 결과:`);
+    console.log(`   - 총 청크: ${validChunks.length}개`);
+    console.log(`   - 텍스트 길이: ${combinedText.length}자`);
+    console.log(`   - 단어 수: ${allWords.length}개`);
+    console.log(`   - 구두점 수: ${(combinedText.match(/[。，！？；]/g) || []).length}개`);
+    console.log(`   - 샘플: "${combinedText.slice(0, 100)}..."`);
+    
+    // 단어가 없으면 텍스트에서 생성
+    if (allWords.length === 0 && combinedText) {
+      console.log('🔧 단어 정보 없음, 텍스트에서 생성');
+      allWords = generateWordsFromText(combinedText, 0);
+    }
+    
+    // 최종 결과 구성
+    const mergedResult = {
+      DisplayText: combinedText,
+      NBest: [{
+        Display: combinedText,
+        Lexical: combinedText,
+        Words: allWords,
+        Confidence: 0.9
+      }],
+      RecognitionStatus: 'Success'
+    };
+    
+    return mergedResult;
     
   } catch (error) {
     console.error('청크 병합 오류:', error);
@@ -1502,395 +1747,9 @@ function formatSecondsToTimeStringPrecise(seconds) {
   return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')},${milliseconds.toString().padStart(3, '0')}`;
 }
 
-// 🎯 통합 싱크 보정 시스템 - 완전한 솔루션
-
-// ========== 1단계: 드리프트 보정된 청크 병합 ==========
-function mergeChunkResultsWithDriftCorrection(chunkResults) {
-  try {
-    console.log('🔗 1단계: 드리프트 보정 병합 시작');
-    
-    const validChunks = chunkResults.filter(chunk => chunk && chunk.NBest && chunk.NBest[0]);
-    if (validChunks.length === 0) {
-      return { DisplayText: '', NBest: [], RecognitionStatus: 'NoMatch' };
-    }
-
-    // 드리프트 분석
-    const driftAnalysis = analyzeDriftPattern(validChunks);
-    console.log('📊 드리프트 분석 결과:', driftAnalysis);
-    
-    // 모든 단어 수집
-    let allWords = [];
-    for (const chunk of validChunks) {
-      if (chunk.NBest && chunk.NBest[0] && chunk.NBest[0].Words) {
-        for (const word of chunk.NBest[0].Words) {
-          allWords.push({
-            ...word,
-            _chunkId: validChunks.indexOf(chunk),
-            _originalOffset: word.Offset
-          });
-        }
-      }
-    }
-    
-    // 드리프트 보정 적용
-    const correctedWords = applyDriftCorrection(allWords, driftAnalysis);
-    
-    // 정렬 및 정리
-    correctedWords.sort((a, b) => (a.Offset || 0) - (b.Offset || 0));
-    const cleanWords = removeDuplicateWords(correctedWords);
-    const smoothedWords = ensureContinuity(cleanWords);
-    
-    // 텍스트 재구성
-    const allDisplayText = smoothedWords.map(w => w.Word || '').join('');
-    
-    console.log('✅ 1단계 완료: 드리프트 보정된 Azure 데이터 준비');
-    
-    return {
-      DisplayText: allDisplayText,
-      NBest: [{
-        Display: allDisplayText,
-        Lexical: allDisplayText,
-        Words: smoothedWords.map(w => {
-          const { _chunkId, _originalOffset, ...cleanWord } = w;
-          return cleanWord;
-        }),
-        Confidence: 0.9
-      }],
-      RecognitionStatus: 'Success',
-      _driftCorrected: true,
-      _totalDurationSec: validChunks.length > 0 && validChunks[validChunks.length - 1]._chunk ? 
-        validChunks[validChunks.length - 1]._chunk.end : undefined
-    };
-    
-  } catch (error) {
-    console.error('드리프트 보정 오류:', error);
-    return { DisplayText: '', NBest: [], RecognitionStatus: 'Failed' };
-  }
-}
-
-// ========== 2단계: 원본 타임스탬프 보존 포맷팅 ==========
-async function formatTranscriptResultIntegrated(azureResult, youtubeUrl) {
-  try {
-    console.log('🔄 2단계: 원본 타임스탬프 보존 포맷팅 시작');
-    
-    // Azure 단어 정보 확인 (드리프트 보정된)
-    const azureWords = azureResult?.NBest?.[0]?.Words || [];
-    console.log(`📊 처리할 단어 수: ${azureWords.length}개 (드리프트 보정됨: ${azureResult._driftCorrected || false})`);
-    
-    if (azureWords.length > 0) {
-      console.log('✅ Azure 단어 기반 타임스탬프 보존 처리');
-      return formatWithDriftCorrectedAzureTiming(azureResult, youtubeUrl);
-    } else {
-      console.log('⚠️ Azure 단어 정보 없음, 안전 모드');
-      return formatWithSafeMode(azureResult, youtubeUrl);
-    }
-    
-  } catch (error) {
-    console.error('통합 포맷팅 오류:', error);
-    return createErrorResult(youtubeUrl, `처리 오류: ${error.message}`);
-  }
-}
-
-// 🎯 드리프트 보정된 Azure 타이밍으로 세그먼트 생성
-function formatWithDriftCorrectedAzureTiming(azureResult, youtubeUrl) {
-  console.log('🎯 2단계: 드리프트 보정된 Azure 타이밍 사용');
-  
-  const azureWords = azureResult.NBest[0].Words || [];
-  const totalDuration = azureResult._totalDurationSec || 0;
-  const isDriftCorrected = azureResult._driftCorrected || false;
-  
-  // 텍스트 추출 및 최소 정제
-  let rawText = azureResult.DisplayText || '';
-  const cleanedText = performMinimalTextCleanup(rawText);
-  console.log(`📝 정제된 텍스트: ${cleanedText.length}자`);
-  
-  // Azure 단어들을 문장으로 그룹화 (타이밍 보존)
-  const sentences = groupAzureWordsIntoNaturalSentences(azureWords);
-  console.log(`📝 문장 그룹화: ${sentences.length}개 (드리프트 보정: ${isDriftCorrected})`);
-  
-  const segments = [];
-  
-  for (let i = 0; i < sentences.length; i++) {
-    const sentence = sentences[i];
-    
-    if (!sentence.text || sentence.text.trim().length === 0) continue;
-    
-    // 🎯 핵심: 드리프트 보정된 Azure 타이밍 그대로 사용
-    const startTimeSec = sentence.startOffset / 10_000_000;
-    const endTimeSec = sentence.endOffset / 10_000_000;
-    
-    // 단어 레벨 타이밍도 보존
-    const wordTimings = sentence.words.map(w => ({
-      word: w.Word,
-      start: (w.Offset || 0) / 10_000_000,
-      end: ((w.Offset || 0) + (w.Duration || 0)) / 10_000_000,
-      confidence: w.Confidence || 0.9
-    }));
-    
-    segments.push({
-      id: i + 1,
-      seek: 0,
-      start: startTimeSec,
-      end: endTimeSec,
-      text: sentence.text,
-      start_time: formatSecondsToTimeStringPrecise(startTimeSec),
-      end_time: formatSecondsToTimeStringPrecise(endTimeSec),
-      original_text: sentence.text,
-      tokens: [],
-      temperature: 0.0,
-      avg_logprob: 0.9,
-      compression_ratio: 1.0,
-      no_speech_prob: 0.1,
-      keywords: extractBasicKeywords(sentence.text),
-      words: wordTimings
-    });
-    
-    console.log(`✅ 세그먼트 ${i + 1}: [${startTimeSec.toFixed(3)} → ${endTimeSec.toFixed(3)}] "${sentence.text.slice(0, 30)}..."`);
-  }
-  
-  // 최종 검증
-  const validation = performTimingValidation(segments, totalDuration);
-  if (!validation.isValid) {
-    console.warn('⚠️ 타이밍 검증 실패, 일부 문제 있지만 진행');
-    // 완전 실패가 아니므로 결과 반환
-  }
-  
-  console.log('✅ 2단계 완료: 원본 타임스탬프 보존 완료');
-  
-  return {
-    text: cleanedText,
-    segments: segments,
-    language: 'zh-CN',
-    url: youtubeUrl,
-    processed_at: new Date().toISOString(),
-    source: 'integrated_drift_corrected_azure_timing',
-    timing_info: {
-      total_segments: segments.length,
-      total_duration: totalDuration,
-      drift_corrected: isDriftCorrected,
-      timing_preservation: 'azure_native_with_drift_correction',
-      word_level_timing: true
-    }
-  };
-}
-
-// ========== 핵심 함수들 ==========
-
-// 드리프트 패턴 분석
-function analyzeDriftPattern(validChunks) {
-  const driftData = [];
-  let cumulativeDrift = 0;
-  
-  for (let i = 0; i < validChunks.length; i++) {
-    const chunk = validChunks[i];
-    const chunkMeta = chunk._chunk || {};
-    const words = chunk.NBest?.[0]?.Words || [];
-    
-    if (words.length === 0) continue;
-    
-    const expectedStart = chunkMeta.start || 0;
-    const expectedEnd = chunkMeta.end || 0;
-    const expectedDuration = expectedEnd - expectedStart;
-    
-    const firstWord = words[0];
-    const lastWord = words[words.length - 1];
-    const actualStart = (firstWord.Offset || 0) / 10_000_000;
-    const actualEnd = ((lastWord.Offset || 0) + (lastWord.Duration || 0)) / 10_000_000;
-    const actualDuration = actualEnd - actualStart;
-    
-    const durationDrift = actualDuration - expectedDuration;
-    cumulativeDrift += durationDrift;
-    
-    driftData.push({
-      chunkIndex: i,
-      expectedStart, expectedEnd, expectedDuration,
-      actualStart, actualEnd, actualDuration,
-      durationDrift, cumulativeDrift
-    });
-    
-    console.log(`📊 청크 ${i + 1} 드리프트: 예상 ${expectedDuration.toFixed(2)}초 → 실제 ${actualDuration.toFixed(2)}초 (차이: ${durationDrift.toFixed(2)}초)`);
-  }
-  
-  const totalDrift = cumulativeDrift;
-  const avgDriftPerChunk = driftData.length > 0 ? totalDrift / driftData.length : 0;
-  const maxDrift = Math.max(...driftData.map(d => Math.abs(d.durationDrift)));
-  
-  return {
-    driftData, totalDrift, avgDriftPerChunk, maxDrift,
-    needsCorrection: Math.abs(totalDrift) > 2.0 || maxDrift > 1.5
-  };
-}
-
-// 드리프트 보정 적용
-function applyDriftCorrection(allWords, driftAnalysis) {
-  if (!driftAnalysis.needsCorrection) {
-    console.log('📊 드리프트 보정 불필요');
-    return allWords;
-  }
-  
-  console.log('🔧 드리프트 보정 적용');
-  const correctedWords = [...allWords];
-  
-  for (const driftInfo of driftAnalysis.driftData) {
-    const chunkWords = correctedWords.filter(w => w._chunkId === driftInfo.chunkIndex);
-    if (chunkWords.length === 0) continue;
-    
-    const correctionRatio = driftInfo.expectedDuration / driftInfo.actualDuration;
-    const clampedRatio = Math.max(0.8, Math.min(1.2, correctionRatio));
-    
-    console.log(`🔧 청크 ${driftInfo.chunkIndex + 1} 보정: ${clampedRatio.toFixed(3)}`);
-    
-    const baseOffset = chunkWords[0]._originalOffset || 0;
-    const expectedChunkStartTicks = driftInfo.expectedStart * 10_000_000;
-    
-    for (const word of chunkWords) {
-      const relativeOffset = (word._originalOffset || 0) - baseOffset;
-      const newRelativeOffset = relativeOffset * clampedRatio;
-      const newDuration = (word.Duration || 0) * clampedRatio;
-      
-      word.Offset = Math.round(expectedChunkStartTicks + newRelativeOffset);
-      word.Duration = Math.round(newDuration);
-    }
-  }
-  
-  return correctedWords;
-}
-
-// Azure 단어들을 자연스러운 문장으로 그룹화
-function groupAzureWordsIntoNaturalSentences(azureWords) {
-  const sentences = [];
-  let currentSentence = { text: '', words: [], startOffset: 0, endOffset: 0 };
-  
-  for (let i = 0; i < azureWords.length; i++) {
-    const word = azureWords[i];
-    const wordText = word.Word || '';
-    
-    if (currentSentence.words.length === 0) {
-      currentSentence.startOffset = word.Offset || 0;
-    }
-    
-    currentSentence.text += wordText;
-    currentSentence.words.push(word);
-    currentSentence.endOffset = (word.Offset || 0) + (word.Duration || 0);
-    
-    const isEndOfSentence = /[。！？]/.test(wordText) || 
-                           (i === azureWords.length - 1) || 
-                           (currentSentence.words.length >= 50);
-    
-    if (isEndOfSentence && currentSentence.text.trim().length > 0) {
-      sentences.push({
-        text: currentSentence.text.trim(),
-        words: [...currentSentence.words],
-        startOffset: currentSentence.startOffset,
-        endOffset: currentSentence.endOffset
-      });
-      currentSentence = { text: '', words: [], startOffset: 0, endOffset: 0 };
-    }
-  }
-  
-  if (currentSentence.text.trim().length > 0) {
-    sentences.push({
-      text: currentSentence.text.trim(),
-      words: currentSentence.words,
-      startOffset: currentSentence.startOffset,
-      endOffset: currentSentence.endOffset
-    });
-  }
-  
-  return sentences;
-}
-
-// 중복 제거, 연속성 보장, 기타 유틸 함수들...
-function removeDuplicateWords(words) {
-  const cleaned = [];
-  const THRESHOLD = 500_000;
-  
-  for (const current of words) {
-    const isDuplicate = cleaned.some(existing => 
-      (current.Word || '') === (existing.Word || '') &&
-      Math.abs((current.Offset || 0) - (existing.Offset || 0)) <= THRESHOLD
-    );
-    
-    if (!isDuplicate) cleaned.push(current);
-  }
-  
-  return cleaned;
-}
-
-function ensureContinuity(words) {
-  const smoothed = [...words].sort((a, b) => (a.Offset || 0) - (b.Offset || 0));
-  
-  for (let i = 1; i < smoothed.length; i++) {
-    const prev = smoothed[i - 1];
-    const current = smoothed[i];
-    const prevEnd = (prev.Offset || 0) + (prev.Duration || 0);
-    
-    if ((current.Offset || 0) < prevEnd) {
-      current.Offset = prevEnd + 100_000; // 10ms 간격
-    }
-  }
-  
-  return smoothed;
-}
-
-// 최소 텍스트 정제
-function performMinimalTextCleanup(text) {
-  let cleaned = text;
-  cleaned = cleaned.replace(/\s+/g, ' ').trim();
-  cleaned = cleaned.replace(/球，/g, '');
-  cleaned = cleaned.replace(/^[，。、；：\s]+/g, '');
-  cleaned = cleaned.replace(/[，。、；：\s]+$/g, '');
-  return cleaned;
-}
-
-// 타이밍 검증
-function performTimingValidation(segments, totalDuration) {
-  const issues = [];
-  
-  for (let i = 0; i < segments.length - 1; i++) {
-    const current = segments[i];
-    const next = segments[i + 1];
-    const gap = Math.abs(next.start - current.end);
-    
-    if (gap > 0.5) {
-      issues.push(`세그먼트 ${i + 1}-${i + 2} 간격: ${gap.toFixed(3)}초`);
-    }
-  }
-  
-  for (let i = 0; i < segments.length; i++) {
-    const segment = segments[i];
-    if (segment.start >= segment.end) {
-      issues.push(`세그먼트 ${i + 1} 시간 오류: start=${segment.start}, end=${segment.end}`);
-    }
-  }
-  
-  if (issues.length > 0) {
-    console.warn('⚠️ 타이밍 검증 이슈:', issues);
-    return { isValid: false, issues };
-  }
-  
-  return { isValid: true, issues: [] };
-}
-
-// 안전 모드 처리
-function formatWithSafeMode(azureResult, youtubeUrl) {
-  console.log('🛡️ 안전 모드 처리 시작');
-  
-  let rawText = extractCleanText(azureResult);
-  if (!rawText) {
-    return createErrorResult(youtubeUrl, '음성 인식 결과가 없습니다');
-  }
-  
-  const cleanedText = performMinimalTextCleanup(rawText);
-  const totalDuration = azureResult._totalDurationSec || 0;
-  const segments = generatePerfectlySyncedSegments(cleanedText, totalDuration);
-  
-  return buildFinalResult(cleanedText, segments, youtubeUrl);
-}
-
 // 🎯 메인 함수 교체
 async function formatTranscriptResult(azureResult, youtubeUrl) {
-  return await formatTranscriptResultIntegrated(azureResult, youtubeUrl);
+  return await formatTranscriptResultWithPerfectSync(azureResult, youtubeUrl);
 }
 
 // 세션 정보 접근 함수 (다른 API에서 사용)
@@ -1986,4 +1845,3 @@ function applyPiecewiseAnchorScalingToWords(words, totalDurationSec) {
 
   return adjusted;
 }
-

@@ -201,7 +201,13 @@ export function useAzureProcessing() {
     return () => clearPolling()
   }, [])
 
-  const checkCaptions = useCallback(async (url: string): Promise<{ hasCaptions: boolean }> => {
+  const checkCaptions = useCallback(async (url: string): Promise<{ 
+    hasCaptions: boolean;
+    availableCaptions?: {
+      manual: string[];
+      automatic: string[];
+    };
+  }> => {
     const res = await fetch(`${BASE_URL}/api/youtube/check`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

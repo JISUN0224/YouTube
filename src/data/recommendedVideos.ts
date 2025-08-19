@@ -36,6 +36,22 @@ export interface RecommendedVideo {
 
 // 하드코딩된 추천 영상 데이터에는 이미 start_time과 end_time 필드가 포함되어 있습니다
 
+// 난이도별 정렬 함수
+export function sortVideosByDifficulty(videos: RecommendedVideo[], order: 'asc' | 'desc' = 'desc'): RecommendedVideo[] {
+  const difficultyOrder = { 'hard': 3, 'medium': 2, 'easy': 1 };
+  
+  return [...videos].sort((a, b) => {
+    const aOrder = difficultyOrder[a.difficulty];
+    const bOrder = difficultyOrder[b.difficulty];
+    
+    if (order === 'desc') {
+      return bOrder - aOrder; // 어려움 -> 보통 -> 쉬움
+    } else {
+      return aOrder - bOrder; // 쉬움 -> 보통 -> 어려움
+    }
+  });
+}
+
 export const recommendedVideos: RecommendedVideo[] = [
   {
     id: "1",

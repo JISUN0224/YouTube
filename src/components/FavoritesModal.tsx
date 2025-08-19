@@ -1,5 +1,5 @@
 import React from 'react'
-import { recommendedVideos } from '../data/recommendedVideos'
+import { recommendedVideos, sortVideosByDifficulty } from '../data/recommendedVideos'
 import { RecommendedVideoCard } from './RecommendedVideoCard'
 import { useNavigate } from 'react-router-dom'
 
@@ -13,19 +13,9 @@ interface FavoritesModalProps {
 export function FavoritesModal({ isOpen, onClose, favoriteIds, onToggleFavorite }: FavoritesModalProps) {
   const navigate = useNavigate()
   
-  console.log('🎭 FavoritesModal 렌더링:', { 
-    isOpen, 
-    favoriteIds,
-    favoriteIdsLength: favoriteIds.length,
-    timestamp: new Date().toISOString()
-  })
-  
   if (!isOpen) {
-    console.log('❌ FavoritesModal: isOpen이 false이므로 모달을 렌더링하지 않음')
     return null
   }
-  
-  console.log('✅ FavoritesModal: isOpen이 true이므로 모달을 렌더링함')
 
   // 즐겨찾기된 영상들만 필터링 (더 유연한 매칭)
   const favoriteVideos = recommendedVideos.filter(video => {
@@ -45,11 +35,6 @@ export function FavoritesModal({ isOpen, onClose, favoriteIds, onToggleFavorite 
     
     return false
   })
-  
-  console.log('🎭 FavoritesModal 디버깅:')
-  console.log('  - favoriteIds:', favoriteIds)
-  console.log('  - recommendedVideos IDs:', recommendedVideos.map(v => v.id))
-  console.log('  - filtered favoriteVideos:', favoriteVideos.map(v => v.id))
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -94,7 +79,7 @@ export function FavoritesModal({ isOpen, onClose, favoriteIds, onToggleFavorite 
             </div>
           ) : (
             <div className="space-y-3">
-              {favoriteVideos.map((video) => (
+              {sortVideosByDifficulty(favoriteVideos, 'desc').map((video) => (
                 <RecommendedVideoCard
                   key={video.id}
                   video={video}

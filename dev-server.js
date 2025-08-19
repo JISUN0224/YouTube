@@ -49,6 +49,15 @@ const setupRoutes = async () => {
       resultHandler(newReq, res);
     });
 
+    // check API (자막 감지)
+    try {
+      const { default: checkHandler } = await import('./api/youtube/check.js');
+      app.post('/api/youtube/check', checkHandler);
+      console.log('✅ /api/youtube/check 엔드포인트 등록 완료');
+    } catch (error) {
+      console.error('❌ /api/youtube/check 엔드포인트 등록 실패:', error);
+    }
+
     console.log('✅ API 라우트 설정 완료');
   } catch (error) {
     console.error('❌ API 라우트 설정 실패:', error);
