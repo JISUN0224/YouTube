@@ -179,6 +179,8 @@ async function tryGetYouTubeCaptions(youtubeUrl) {
       '--write-auto-sub',
       '--sub-format', 'srv3/vtt/srt/best',
       '--sub-langs', 'zh-Hans,zh-CN,zh,zh-Hant,en',
+      '--cookies-from-browser', 'chrome',
+      '--extractor-args', 'youtube:player_client=web',
       '-o', outTemplate,
       youtubeUrl
     ]);
@@ -309,6 +311,8 @@ async function extractAudioUrl(youtubeUrl) {
       '--get-url',
       '-f', 'bestaudio[ext=mp3]/bestaudio',
       '--no-playlist',
+      '--cookies-from-browser', 'chrome',
+      '--extractor-args', 'youtube:player_client=web',
       youtubeUrl
     ]);
 

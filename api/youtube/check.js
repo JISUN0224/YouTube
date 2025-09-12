@@ -14,6 +14,8 @@ async function checkWithBasicInfo(youtubeUrl) {
     const ytdlp = spawn('yt-dlp', [
       '--dump-json',
       '--skip-download',
+      '--cookies-from-browser', 'chrome',
+      '--extractor-args', 'youtube:player_client=web',
       youtubeUrl
     ])
     
