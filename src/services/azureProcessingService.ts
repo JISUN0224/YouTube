@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-const BASE_URL = 'http://localhost:3001'
+const BASE_URL = process.env.NODE_ENV === 'production' 
+  ? 'https://youtubetranslation-production.up.railway.app'  // Railway 배포 서버
+  : 'http://localhost:3001'  // 로컬 개발 서버
 
 type ProcessingStatusResponse = {
   status: 'started' | 'completed' | 'error' | string

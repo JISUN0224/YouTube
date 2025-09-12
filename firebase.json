@@ -2,7 +2,7 @@
   "hosting": [
     {
       "site": "myprojectweb-yt",
-      "public": "Youtube/dist",
+      "public": "dist",
       "ignore": [
         "firebase.json",
         "**/.*",

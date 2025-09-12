@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { extractWithFallback } from './fallback-extractor.js'
 
 // 기본 정보 조회로 자막 확인
 // 이 함수가 자막 체크의 주 로직이 됩니다.
@@ -14,8 +15,9 @@ async function checkWithBasicInfo(youtubeUrl) {
     const ytdlp = spawn('yt-dlp', [
       '--dump-json',
       '--skip-download',
-      '--extractor-args', 'youtube:player_client=web,mweb',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      '--extractor-args', 'youtube:player_client=android,web',
+      '--user-agent', 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+      '--add-header', 'Accept-Language:en-US,en;q=0.9',
       youtubeUrl
     ])
     
