@@ -179,8 +179,8 @@ async function tryGetYouTubeCaptions(youtubeUrl) {
       '--write-auto-sub',
       '--sub-format', 'srv3/vtt/srt/best',
       '--sub-langs', 'zh-Hans,zh-CN,zh,zh-Hant,en',
-      '--cookies-from-browser', 'chrome',
-      '--extractor-args', 'youtube:player_client=web',
+      '--extractor-args', 'youtube:player_client=web,mweb',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       '-o', outTemplate,
       youtubeUrl
     ]);
@@ -295,6 +295,10 @@ function extractYouTubeVideoId(url) {
       return u.pathname.replace('/', '').trim();
     }
     if (u.searchParams.has('v')) return u.searchParams.get('v');
+    // YouTube Shorts 지원 추가
+    if (u.pathname.includes('/shorts/')) {
+      return u.pathname.replace('/shorts/', '').trim();
+    }
     return null;
   } catch {
     return null;
@@ -311,8 +315,8 @@ async function extractAudioUrl(youtubeUrl) {
       '--get-url',
       '-f', 'bestaudio[ext=mp3]/bestaudio',
       '--no-playlist',
-      '--cookies-from-browser', 'chrome',
-      '--extractor-args', 'youtube:player_client=web',
+      '--extractor-args', 'youtube:player_client=web,mweb',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       youtubeUrl
     ]);
 

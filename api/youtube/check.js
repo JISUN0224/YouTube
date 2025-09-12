@@ -14,8 +14,8 @@ async function checkWithBasicInfo(youtubeUrl) {
     const ytdlp = spawn('yt-dlp', [
       '--dump-json',
       '--skip-download',
-      '--cookies-from-browser', 'chrome',
-      '--extractor-args', 'youtube:player_client=web',
+      '--extractor-args', 'youtube:player_client=web,mweb',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       youtubeUrl
     ])
     
@@ -108,6 +108,10 @@ function extractYouTubeVideoId(url) {
       return u.pathname.replace('/', '').trim()
     }
     if (u.searchParams.has('v')) return u.searchParams.get('v')
+    // YouTube Shorts 지원 추가
+    if (u.pathname.includes('/shorts/')) {
+      return u.pathname.replace('/shorts/', '').trim()
+    }
     return null
   } catch {
     return null
