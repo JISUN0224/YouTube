@@ -66,7 +66,6 @@ export class FirebaseFavoritesService {
 
       return { success: true, message: '즐겨찾기에 추가되었습니다' }
     } catch (error) {
-      console.error('Firebase 즐겨찾기 추가 오류:', error)
       throw error
     }
   }
@@ -91,7 +90,6 @@ export class FirebaseFavoritesService {
 
       return { success: true, message: '즐겨찾기에서 제거되었습니다' }
     } catch (error) {
-      console.error('Firebase 즐겨찾기 제거 오류:', error)
       throw error
     }
   }
@@ -116,7 +114,6 @@ export class FirebaseFavoritesService {
         return []
       }
     } catch (error) {
-      console.error('Firebase 즐겨찾기 조회 오류:', error)
       return []
     }
   }
@@ -127,7 +124,6 @@ export class FirebaseFavoritesService {
       const favorites = await this.getFavorites(userId)
       return favorites.includes(videoId)
     } catch (error) {
-      console.error('Firebase 즐겨찾기 확인 오류:', error)
       return false
     }
   }

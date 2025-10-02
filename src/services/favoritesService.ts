@@ -26,7 +26,6 @@ export const addToFavorites = async (userId: string, videoId: string, videoData?
     await FirebaseFavoritesService.addFavorite(userId, videoId, videoData)
     return true;
   } catch (error) {
-    console.error('❌ Firebase 즐겨찾기 추가 오류:', error);
     return false;
   }
 };
@@ -37,7 +36,6 @@ export const removeFromFavorites = async (userId: string, videoId: string): Prom
     await FirebaseFavoritesService.removeFavorite(userId, videoId)
     return true;
   } catch (error) {
-    console.error('❌ Firebase 즐겨찾기 제거 오류:', error);
     return false;
   }
 };
@@ -48,7 +46,6 @@ export const getFavorites = async (userId: string): Promise<string[]> => {
     const favorites = await FirebaseFavoritesService.getFavorites(userId)
     return favorites;
   } catch (error) {
-    console.error('❌ Firebase 즐겨찾기 조회 오류:', error);
     return [];
   }
 };
@@ -58,7 +55,6 @@ export const isFavorite = async (userId: string, videoId: string): Promise<boole
   try {
     return await FirebaseFavoritesService.isFavorite(userId, videoId)
   } catch (error) {
-    console.error('❌ Firebase 즐겨찾기 확인 오류:', error);
     return false;
   }
 };
@@ -70,7 +66,6 @@ export const login = async (email: string, password: string): Promise<{ success:
     // 여기서는 호환성을 위해 더미 응답 반환
     return { success: true, message: 'Firebase Auth를 통해 로그인되었습니다' };
   } catch (error) {
-    console.error('❌ 로그인 오류:', error);
     return { success: false, message: '로그인 중 오류가 발생했습니다' };
   }
 };

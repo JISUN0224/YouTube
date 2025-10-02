@@ -59,7 +59,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (result.user) {
       const userId = 'user_' + Date.now()
       localStorage.setItem('userId', userId)
-      console.log('🔐 Google 로그인 성공, userId 저장:', userId)
+      // Google 로그인 성공, userId 저장
     }
   }
 
@@ -70,7 +70,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     
     // 로그아웃 시 userId 제거
     localStorage.removeItem('userId')
-    console.log('🔐 로그아웃 완료, userId 제거됨')
+    // 로그아웃 완료, userId 제거됨
   }
 
   useEffect(() => {
@@ -89,12 +89,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
         if (!existingUserId) {
           const userId = 'user_' + Date.now()
           localStorage.setItem('userId', userId)
-          console.log('🔐 사용자 로그인 감지, userId 생성:', userId)
+          // 사용자 로그인 감지, userId 생성
         }
       } else {
         // 로그아웃된 경우 userId 제거
         localStorage.removeItem('userId')
-        console.log('🔐 사용자 로그아웃 감지, userId 제거됨')
+        // 사용자 로그아웃 감지, userId 제거됨
       }
       
       setLoading(false)

@@ -23,40 +23,10 @@ export const Tour: React.FC<TourProps> = ({ steps, visible, onClose }) => {
     if (!visible) return;
 
     // setTimeout으로 렌더링 지연을 줍니다.
-    const delay = currentStep === 2 ? 200 : 100; // 추천 영상 단계는 더 오래 대기
+    const delay = 100;
     const timer = setTimeout(() => {
       const target = document.querySelector(steps[currentStep]?.targetSelector) as HTMLElement;
-      
-      // 디버깅: 4단계에서 타겟 요소 정보 출력
-      if (currentStep === 3) {
-        console.log('Tour: 4단계 타겟 요소 검색 중...');
-        console.log('  - targetSelector:', steps[currentStep]?.targetSelector);
-        console.log('  - target found:', !!target);
-        if (target) {
-          const rect = target.getBoundingClientRect();
-          console.log('  - target position:', { top: rect.top, left: rect.left, width: rect.width, height: rect.height });
-        }
-      }
-      
       setTargetElement(target);
-
-      if (target) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      } else {
-        // 4단계에서 타겟을 찾지 못하면 다시 시도
-        if (currentStep === 3) {
-          console.warn('Tour: 4단계 타겟 요소를 찾을 수 없음, 재시도 중...');
-          setTimeout(() => {
-            const retryTarget = document.querySelector(steps[currentStep]?.targetSelector) as HTMLElement;
-            if (retryTarget) {
-              console.log('Tour: 4단계 타겟 요소 재시도 성공');
-              setTargetElement(retryTarget);
-            } else {
-              console.error('Tour: 4단계 타겟 요소 재시도 실패');
-            }
-          }, 100);
-        }
-      }
     }, delay);
 
     // 컴포넌트 언마운트 시 타이머 클린업
@@ -101,33 +71,14 @@ export const Tour: React.FC<TourProps> = ({ steps, visible, onClose }) => {
     if (!targetElement) return { top: 0, left: 0, width: 0, height: 0 };
 
     const rect = targetElement.getBoundingClientRect();
-    let padding = currentStepData.padding || 8;
+    const padding = currentStepData.padding || 8;
     
-    // 추천 영상 단계의 경우 더 큰 패딩 적용
-    if (currentStep === 2) { // 추천 영상 단계
-      padding = 80; // 더 큰 패딩으로 전체 섹션 완전히 포함
-    }
-    
-    // 4단계 디버깅
-    if (currentStep === 3) {
-      console.log('Tour: 4단계 getTargetPosition 호출');
-      console.log('  - rect:', { top: rect.top, left: rect.left, width: rect.width, height: rect.height });
-      console.log('  - padding:', padding);
-    }
-    
-    const result = {
+    return {
       top: rect.top - padding,
       left: rect.left - padding,
       width: rect.width + (padding * 2),
       height: rect.height + (padding * 2),
     };
-    
-    // 4단계 결과 디버깅
-    if (currentStep === 3) {
-      console.log('  - result:', result);
-    }
-    
-    return result;
   };
 
   const getTooltipPosition = () => {
@@ -136,42 +87,31 @@ export const Tour: React.FC<TourProps> = ({ steps, visible, onClose }) => {
     const rect = targetElement.getBoundingClientRect();
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
-    const tooltipWidth = 320; // 툴팁의 대략적인 너비
-    const tooltipHeight = 200; // 툴팁의 대략적인 높이
+    const tooltipWidth = 320;
+    const tooltipHeight = 200;
     const margin = 16;
 
     let top, left;
 
-    // 현재 단계에 따라 특별한 위치 조정
-    if (currentStep === 2) { // 추천 영상 단계
-      // 오른쪽에 배치
+    // 기본 로직: 오른쪽에 공간이 있으면 오른쪽에 배치
+    if (rect.right + tooltipWidth + margin < viewportWidth) {
       left = rect.right + margin;
       top = rect.top;
-    } else if (currentStep === 3) { // 로그인 버튼 단계
-      // 왼쪽에 배치 (버튼이 오른쪽에 있으므로)
+    }
+    // 왼쪽에 공간이 있으면 왼쪽에 배치
+    else if (rect.left - tooltipWidth - margin > 0) {
       left = rect.left - tooltipWidth - margin;
       top = rect.top;
-    } else {
-      // 기본 로직: 오른쪽에 공간이 있으면 오른쪽에 배치
-      if (rect.right + tooltipWidth + margin < viewportWidth) {
-        left = rect.right + margin;
-        top = rect.top;
-      }
-      // 왼쪽에 공간이 있으면 왼쪽에 배치
-      else if (rect.left - tooltipWidth - margin > 0) {
-        left = rect.left - tooltipWidth - margin;
-        top = rect.top;
-      }
-      // 위쪽에 공간이 있으면 위쪽에 배치
-      else if (rect.top - tooltipHeight - margin > 0) {
-        left = rect.left;
-        top = rect.top - tooltipHeight - margin;
-      }
-      // 아래쪽에 배치
-      else {
-        left = rect.left;
-        top = rect.bottom + margin;
-      }
+    }
+    // 위쪽에 공간이 있으면 위쪽에 배치
+    else if (rect.top - tooltipHeight - margin > 0) {
+      left = rect.left;
+      top = rect.top - tooltipHeight - margin;
+    }
+    // 아래쪽에 배치
+    else {
+      left = rect.left;
+      top = rect.bottom + margin;
     }
 
     // 화면 경계를 벗어나지 않도록 조정

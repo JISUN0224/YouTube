@@ -1,185 +1,79 @@
-﻿import React, { useEffect, useRef, useState } from 'react'
+﻿import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useVideoProcessing } from '../contexts/VideoProcessingContext'
-import { validateYouTubeUrl, extractVideoId } from '../utils/youtube.validation'
-import type { VideoInfo } from '../types/youtube.types'
-
 import { useAuth } from '../contexts/AuthContext'
 import { UserProfile } from '../components/UserProfile'
 import { LoginModal } from '../components/LoginModal'
 import { recommendedVideos, sortVideosByDifficulty } from '../data/recommendedVideos'
 import { RecommendedVideoCard } from '../components/RecommendedVideoCard'
-import { useAzureProcessing } from '../services/azureProcessingService'
 import { addToFavorites, removeFromFavorites, getFavorites } from '../services/favoritesService'
 import { FavoritesModal } from '../components/FavoritesModal'
-import { Tour } from '../components/UI/Tour'
-import CaptionLanguageModal from '../components/CaptionLanguageModal'
 
-const styles = {
-  background: 'bg-gradient-to-br from-sky-50 to-blue-100',
-  container: 'max-w-[1800px] mx-auto px-4 py-16',
-  card: 'bg-white rounded-[20px] shadow-2xl p-10',
-  button:
-    'px-6 py-3 bg-[#4285f4] hover:bg-[#3367d6] text-white rounded-lg transition-all duration-200 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed font-semibold',
-  input:
-    'flex-1 px-4 py-3 border-2 border-gray-300 rounded-[10px] focus:border-[#4285f4] focus:outline-none transition-colors',
-}
-
-export default function YouTubeGenerator() {
+const YouTubeGenerator: React.FC = () => {
   const navigate = useNavigate()
-  const { setYoutubeUrl, setVideoInfo, videoInfo } = useVideoProcessing()
   const { currentUser } = useAuth()
-  const { checkCaptions } = useAzureProcessing()
-  const [url, setUrl] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [verified, setVerified] = useState(false)
-  const [videoId, setVideoId] = useState('')
 
   const [showLoginModal, setShowLoginModal] = useState(false)
   const [showFavoritesModal, setShowFavoritesModal] = useState(false)
   const [favoriteIds, setFavoriteIds] = useState<string[]>([])
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   
-  // 온보딩 투어 상태
-  const [showTour, setShowTour] = useState(() => {
-    return localStorage.getItem('youtube-tour-done') !== '1'
-  })
-  const derivedId = extractVideoId(url || '')
-  const iframeRef = useRef<HTMLIFrameElement | null>(null)
-  const playerRef = useRef<any>(null)
-  const CAPTION_LIMIT_SECONDS = 40 * 60
-  const NO_CAPTION_LIMIT_SECONDS = 25 * 60
-  const [hasCaptions, setHasCaptions] = useState<boolean | null>(null)
-  const [showCaptionModal, setShowCaptionModal] = useState(false)
-  const [availableCaptions, setAvailableCaptions] = useState<{
-    manual: string[];
-    automatic: string[];
-  }>({ manual: [], automatic: [] })
 
-  // 온보딩 투어 단계 정의
-  const tourSteps = [
-    {
-      id: 'step1',
-      title: 'YouTube URL 입력',
-      description: '분석하고 싶은 YouTube 영상의 URL을 입력하세요. 지원 형식: https://www.youtube.com/watch?v=ID, https://youtu.be/ID 또는 11자리 ID',
-      targetSelector: '[data-tour="url-input"]',
-      padding: 8,
-    },
-    {
-      id: 'step2',
-      title: '주의사항',
-      description: '자막이 있는 영상은 40분, 자막이 없는 영상은 25분까지 처리 가능합니다. 처리 시간은 영상 길이에 따라 달라질 수 있습니다.',
-      targetSelector: '[data-tour="notice"]',
-      padding: 8,
-    },
-    {
-      id: 'step3',
-      title: '추천 영상',
-      description: '미리 준비된 추천 영상들을 바로 시도해보세요. 별도의 URL 입력 없이 바로 분석을 시작할 수 있습니다.',
-      targetSelector: '[data-tour="recommended"]',
-      padding: 16,
-    },
-    {
-      id: 'step4',
-      title: '로그인 및 즐겨찾기',
-      description: '로그인하면 원하는 영상을 즐겨찾기에 추가할 수 있습니다. 즐겨찾기한 영상은 언제든지 빠르게 접근할 수 있어요!',
-      targetSelector: '[data-tour="login"]',
-      padding: 8,
-    },
-  ]
+  // 필터링 상태
+  const [activeTab, setActiveTab] = useState<'all' | 'easy' | 'medium' | 'hard'>('all')
+  const [selectedCategory, setSelectedCategory] = useState<string>('all')
+  const [selectedTag, setSelectedTag] = useState<string>('all')
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('all')
+  const [searchTerm, setSearchTerm] = useState('')
 
-  // 온보딩 투어 닫기 함수
-  const closeTour = (opts?: { dontShowAgain?: boolean }) => {
-    if (opts?.dontShowAgain) {
-      localStorage.setItem('youtube-tour-done', '1')
-    }
-    setShowTour(false)
-  }
 
-  const formatDuration = (totalSeconds: number): string => {
-    if (!totalSeconds || totalSeconds < 0) return '확인 중...'
-    const hours = Math.floor(totalSeconds / 3600)
-    const minutes = Math.floor((totalSeconds % 3600) / 60)
-    const seconds = Math.floor(totalSeconds % 60)
-    const mm = hours > 0 ? String(minutes).padStart(2, '0') : String(minutes)
-    const ss = String(seconds).padStart(2, '0')
-    return hours > 0 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`
-  }
 
   // 로그인 상태 및 즐겨찾기 로드
   useEffect(() => {
     const loadUserData = async () => {
-      console.log('🔄 사용자 데이터 로딩 시작...')
-      console.log('📋 currentUser 상태:', currentUser)
-      console.log('📋 localStorage에서 userId:', localStorage.getItem('userId'))
+      // 사용자 데이터 로딩 시작
       
-      // AuthContext의 currentUser 상태를 우선 확인
       if (currentUser) {
-        console.log('✅ currentUser 발견, 로그인 상태로 설정')
         setIsLoggedIn(true)
-        
-        // Firebase Auth의 UID 사용
         const firebaseUserId = currentUser.uid
-        console.log('📋 Firebase Auth UID:', firebaseUserId)
         
         try {
           const favorites = await getFavorites(firebaseUserId)
           setFavoriteIds(favorites)
         } catch (error) {
-          console.error('❌ 즐겨찾기 로딩 실패:', error)
           setFavoriteIds([])
         }
       } else {
-        console.log('❌ currentUser 없음, 로그아웃 상태로 설정')
+        // currentUser 없음, 로그아웃 상태로 설정
         setIsLoggedIn(false)
         setFavoriteIds([])
       }
     }
     loadUserData()
-  }, [currentUser]) // currentUser가 변경될 때마다 실행
-
-
+  }, [currentUser])
 
   // 즐겨찾기 토글 (Firebase Auth 기반)
   const handleToggleFavorite = async (videoId: string) => {
-    // 즐겨찾기 토글 시작
-    
     if (!currentUser) {
-      console.log('❌ 로그인되지 않음, 로그인 모달 표시')
+      // 로그인되지 않음, 로그인 모달 표시
       setShowLoginModal(true)
       return
     }
     
     const firebaseUserId = currentUser.uid
-    console.log('📋 Firebase Auth UID:', firebaseUserId)
-    
-            // 즐겨찾기 제거 처리
     
     try {
       if (favoriteIds.includes(videoId)) {
-        // 즐겨찾기 제거
         const success = await removeFromFavorites(firebaseUserId, videoId)
         if (success) {
-          setFavoriteIds(prev => {
-            const newIds = prev.filter(id => id !== videoId)
-            // favoriteIds 업데이트 (제거)
-            return newIds
-          })
+          setFavoriteIds(prev => prev.filter(id => id !== videoId))
         }
       } else {
-        // 즐겨찾기 추가
         const success = await addToFavorites(firebaseUserId, videoId)
         if (success) {
-          setFavoriteIds(prev => {
-            const newIds = [...prev, videoId]
-            // favoriteIds 업데이트 (추가)
-            return newIds
-          })
+          setFavoriteIds(prev => [...prev, videoId])
         }
       }
     } catch (error) {
-      console.error('❌ 즐겨찾기 토글 오류:', error)
     }
   }
 
@@ -188,145 +82,59 @@ export default function YouTubeGenerator() {
     localStorage.removeItem('userId')
     setIsLoggedIn(false)
     setFavoriteIds([])
-    // 기존 Firebase 로그아웃도 함께
-    if (currentUser) {
-      // Firebase 로그아웃 로직이 있다면 여기에 추가
-    }
   }
 
+  // 카테고리 목록 추출
+  const categories = ['all', ...Array.from(new Set(recommendedVideos.map(video => video.category)))]
+  
+  // 태그 목록 추출 (빈도순으로 정렬)
+  const allTags = recommendedVideos.flatMap(video => video.tags)
+  const tagCounts = allTags.reduce((acc, tag) => {
+    acc[tag] = (acc[tag] || 0) + 1
+    return acc
+  }, {} as Record<string, number>)
+  const tags = ['all', ...Object.keys(tagCounts).sort((a, b) => tagCounts[b] - tagCounts[a])]
+  
+  // 언어 목록 추출 (zh와 zh-CN을 통합)
+  const allLanguages = recommendedVideos.map(video => {
+    const lang = video.processedData?.language || 'unknown'
+    return lang === 'zh' ? 'zh-CN' : lang // zh를 zh-CN으로 통일
+  })
+  const languages = ['all', ...Array.from(new Set(allLanguages))]
+  
+  // 필터링된 영상 목록
+  const filteredVideos = recommendedVideos.filter(video => {
+    const matchesDifficulty = activeTab === 'all' || video.difficulty === activeTab
+    const matchesCategory = selectedCategory === 'all' || video.category === selectedCategory
+    const matchesTag = selectedTag === 'all' || video.tags.includes(selectedTag)
+    const videoLang = video.processedData?.language || 'unknown'
+    const normalizedVideoLang = videoLang === 'zh' ? 'zh-CN' : videoLang
+    const matchesLanguage = selectedLanguage === 'all' || normalizedVideoLang === selectedLanguage
+    const matchesSearch = searchTerm === '' || 
+      video.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      video.channel.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      video.tags.some(tag => tag.toLowerCase().includes(searchTerm.toLowerCase()))
+    
+    return matchesDifficulty && matchesCategory && matchesTag && matchesLanguage && matchesSearch
+  })
 
-
-
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setError('')
-
-    if (!validateYouTubeUrl(url) || !derivedId) {
-      setError('영상 ID를 추출하지 못했습니다. 지원 형식: https://www.youtube.com/watch?v=ID, https://youtu.be/ID 또는 11자리 ID')
-      return
-    }
-
-    setIsLoading(true)
-    setYoutubeUrl(url)
-    setVideoId(derivedId)
-    const placeholder: VideoInfo = {
-      id: derivedId,
-      title: 'YouTube 영상',
-      channel: 'YouTube',
-      duration: '확인 중...',
-      durationSeconds: 0,
-      language: '확인 중...',
-      description: '',
-      thumbnail: `https://img.youtube.com/vi/${derivedId}/mqdefault.jpg`,
-    }
-    setVideoInfo(placeholder)
-    try {
-      // 자막 존재 여부 확인(백엔드 경량 체크)
-      let detectedCaptions = false
-      let captionResult = null
-      try {
-        const chk = await checkCaptions(url)
-        detectedCaptions = !!chk?.hasCaptions
-        captionResult = chk
-        console.log('🔍 자막 감지 결과:', chk)
-      } catch {}
-      setHasCaptions(detectedCaptions)
-      
-      // 여러 언어가 감지되면 언어 선택 모달 표시
-      console.log('🔍 captionResult 구조:', captionResult)
-      console.log('🔍 hasCaptions:', captionResult?.hasCaptions)
-      console.log('🔍 availableCaptions:', captionResult?.availableCaptions)
-      
-      if (captionResult?.hasCaptions && captionResult?.availableCaptions) {
-        const allLanguages = [
-          ...captionResult.availableCaptions.manual,
-          ...captionResult.availableCaptions.automatic
-        ]
-        console.log('🔍 전체 언어 목록:', allLanguages)
-        console.log('🔍 언어 개수:', allLanguages.length)
-        
-        if (allLanguages.length > 1) {
-          console.log('🌍 여러 언어 감지, 언어 선택 모달 표시')
-          setAvailableCaptions(captionResult.availableCaptions)
-          setShowCaptionModal(true)
-        } else {
-          console.log('🌍 단일 언어 또는 언어 없음, 모달 표시 안함')
-        }
-      } else {
-        console.log('🌍 자막 정보 없음, 모달 표시 안함')
-      }
-      
-      setVerified(true)
-    } catch (err: any) {
-      setError(err?.message || '영상 확인에 실패했습니다')
-    } finally {
-      setIsLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (!verified || !derivedId) return
-
-    const loadIframeApi = (): Promise<void> => {
-      return new Promise((resolve) => {
-        if (typeof window !== 'undefined' && (window as any).YT && (window as any).YT.Player) {
-          resolve()
-          return
-        }
-        const prev = document.querySelector('script[src="https://www.youtube.com/iframe_api"]') as HTMLScriptElement | null
-        if (prev) {
-          const check = () => {
-            if ((window as any).YT && (window as any).YT.Player) resolve()
-            else setTimeout(check, 50)
-          }
-          check()
-          return
-        }
-        const tag = document.createElement('script')
-        tag.src = 'https://www.youtube.com/iframe_api'
-        document.body.appendChild(tag)
-        ;(window as any).onYouTubeIframeAPIReady = () => resolve()
-      })
-    }
-
-    let isMounted = true
-    loadIframeApi().then(() => {
-      if (!isMounted || !iframeRef.current) return
-      try {
-        // attach player to existing iframe
-        playerRef.current = new (window as any).YT.Player(iframeRef.current, {
-          events: {
-            onReady: (event: any) => {
-              const seconds = Math.floor(event.target.getDuration?.() || 0)
-              if (videoInfo) {
-                setVideoInfo({ ...videoInfo, durationSeconds: seconds, duration: formatDuration(seconds) })
-              }
-            },
-          },
-        })
-      } catch {
-        // ignore
-      }
-    })
-
-    return () => {
-      isMounted = false
-      try {
-        playerRef.current?.destroy?.()
-      } catch {
-        // ignore
-      }
-    }
-  }, [verified, derivedId, setVideoInfo])
-
-  const isInvalid = url.length > 0 && !validateYouTubeUrl(url)
+  // 정렬된 영상 목록
+  const sortedVideos = sortVideosByDifficulty(filteredVideos, 'asc')
 
   return (
-    <div className={`${styles.background} min-h-screen animate-fadeIn`}>
-      {/* 네비게이션 헤더 */}
-      <div data-tour="login" className="absolute top-0 right-0 p-6 z-10 flex items-center gap-3">
-        {/* 기존 로그인 버튼 */}
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
+      {/* 헤더 */}
+      <header className="bg-white shadow-sm border-b border-gray-200">
+        <div className="w-full max-w-7xl mx-auto px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-4xl font-bold text-gray-800">
+                5.3.4.  AI 유튜브 통역 연습 시스템
+              </h1>
+            </div>
+            
+            {/* 로그인 및 즐겨찾기 버튼 */}
+            <div className="flex items-center gap-3">
         {currentUser ? (
           <UserProfile />
         ) : (
@@ -341,223 +149,153 @@ export default function YouTubeGenerator() {
           </button>
         )}
         
-        {/* 즐겨찾기 버튼 (로그인된 경우) */}
+              {/* 대시보드 버튼 */}
+              <button
+                onClick={() => navigate('/dashboard')}
+                className="px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 shadow-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all duration-200 flex items-center gap-2"
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zM14 9a1 1 0 00-1 1v6a1 1 0 001 1h2a1 1 0 001-1v-6a1 1 0 00-1-1h-2z" />
+                </svg>
+                대시보드
+              </button>
+
+
         {isLoggedIn && (
           <button
-            onClick={() => {
-              setShowFavoritesModal(true)
-            }}
-            className="px-3 py-2 rounded-lg bg-pink-500 text-white hover:bg-pink-600 shadow-md focus:outline-none focus:ring-2 focus:ring-pink-500 focus:ring-offset-2 transition-all duration-200 flex items-center gap-2 text-sm"
-            title="즐겨찾기 목록 보기"
-          >
-            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-              <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                  onClick={() => setShowFavoritesModal(true)}
+                  className="px-4 py-2 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 shadow-md focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-all duration-200 flex items-center gap-2"
+                >
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
             </svg>
-            즐겨찾기 ({favoriteIds.length})
+                  즐겨찾기
           </button>
         )}
       </div>
-
-      <div className={styles.container}>
-        {/* 페이지 제목 */}
-        <div className="text-center mb-12">
-          <div className="inline-block p-8 md:p-16 bg-white/20 backdrop-blur-xl rounded-[20px] border-2 border-white/40 shadow-2xl">
-            {/* 메인 제목 */}
-            <h1 className="text-3xl md:text-6xl font-bold bg-gradient-to-r from-red-600 via-purple-600 to-blue-600 bg-[length:300%_300%] animate-[gradientShift_4s_ease-in-out_infinite,fadeInUp_1s_ease-out_0.6s_forwards] bg-clip-text text-transparent opacity-0">
-              YouTube 실시간 통역 연습 생성기<span className="text-white ml-2 md:ml-4 text-2xl md:text-4xl animate-bounce">🎬</span>
-            </h1>
           </div>
         </div>
+      </header>
 
-        {/* 메인 레이아웃: 왼쪽 입력/정보, 오른쪽 추천 리스트 */}
-        <div className="flex gap-12 items-start">
-          {/* 왼쪽: URL 입력 및 영상 정보 (1.5배 확장) */}
-          <div className="flex-1 max-w-5xl">
-            <div className={styles.card}>
-            <h2 className="text-2xl font-bold text-gray-900 mb-6"> YouTube URL 입력</h2>
-            <form onSubmit={handleSubmit} className="space-y-6">
-              <div data-tour="url-input">
-                <label className="block text-sm font-medium text-gray-700 mb-2">YouTube 영상 URL</label>
-                <div className="flex flex-col gap-3 sm:flex-row">
+      <main className="py-8">
+        <div className="w-full max-w-7xl mx-auto px-6">
+          {/* 필터링 섹션 */}
+          <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <div className="flex flex-col lg:flex-row gap-6">
+              {/* 검색 */}
+              <div className="flex-1">
+                <label htmlFor="search" className="block text-sm font-medium text-gray-700 mb-2">
+                  🔍 영상 검색
+                </label>
                   <input
-                    type="url"
-                    value={url}
-                    onChange={(e) => {
-                      setUrl(e.target.value)
-                      setVerified(false)
-                      setVideoId('')
-                      setError('')
-                      setShowCaptionModal(false)
-                    }}
-                    placeholder="https://www.youtube.com/watch?v=..."
-                    className={styles.input}
-                    disabled={isLoading}
-                  />
-                  <button type="submit" disabled={!url || isLoading || isInvalid} className={styles.button}>
-                    {isLoading ? '확인 중...' : '영상 확인'}
-                  </button>
-                </div>
-                {url && (
-                  <div className="mt-2 text-sm">
-                    {derivedId ? (
-                      <span className="text-green-700">동영상 ID 확인됨: {derivedId}</span>
-                    ) : (
-                      <span className="text-red-600">동영상 ID를 추출하지 못했습니다. 예: https://www.youtube.com/watch?v=dQw4w9WgXcQ</span>
-                    )}
-                  </div>
-                )}
-                {!url && <p className="mt-2 text-sm text-gray-500">지원 형식: youtube.com/watch?v=ID, youtu.be/ID, 또는 11자리 ID</p>}
-                {error && <p className="mt-1 text-sm text-red-600">{error}</p>}
-                {!derivedId && url && (
-                  <div className="mt-2 text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded p-3">
-                    확인 불가 사유 예시:
-                    <ul className="list-disc pl-5 mt-1 space-y-1">
-                      <li>URL 형식이 지원 범위를 벗어났습니다. 예: youtube.com/watch?v=ID, youtu.be/ID</li>
-                      <li>영상이 비공개/연령제한/지역제한일 수 있습니다</li>
-                      <li>일시적 네트워크 문제로 확인에 실패했습니다. 잠시 후 다시 시도해 주세요</li>
-                    </ul>
-                  </div>
-                )}
+                  id="search"
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="제목, 채널, 태그로 검색..."
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
               </div>
 
-              <div data-tour="notice" className="bg-blue-50 rounded-lg p-4">
-                <h3 className="font-semibold text-blue-900 mb-2"> 읽어주세요!</h3>
-                <div className="text-sm text-blue-800 space-y-2">
-                  <div>
-                    <div className="font-semibold">최대 길이 제한</div>
-                    <ul className="list-disc pl-5 mt-1 space-y-1">
-                      <li>유튜브 자막이 있는 경우: 최대 40분</li>
-                      <li>유튜브 자막이 없는 경우: 최대 25분</li>
-                    </ul>
-                    <div className="mt-1 text-blue-900/80">
-                      이유: 자막이 있으면 다운로드·파싱만으로 정확한 타임라인 사용이 가능하지만, 자막이 없으면 오디오를 여러 청크로 나눠 인식·병합해야하므로, 처리 시간과 오류 리스크가 커집니다.
-                    </div>
-                  </div>
-                  <div className="pt-2">
-                    <div className="font-semibold">주의사항</div>
-                    <ul className="list-disc pl-5 mt-1 space-y-1">
-                      <li>배경음/음악이 과도하게 크거나 음질이 나쁜 경우 인식 정확도가 떨어질 수 있어요.</li>
-                      <li>동시 대화(인터뷰/토론 등)나 강한 리버브 환경은 성능이 낮아질 수 있어요.</li>
-                      <li>비공개/연령제한/지역제한 영상, 라이브/프리미어 진행 중인 영상은 지원되지 않을 수 있어요.</li>
-                    </ul>
-                  </div>
-                </div>
+              {/* 난이도 필터 */}
+              <div className="lg:w-48">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  📊 난이도
+                </label>
+                <select
+                  value={activeTab}
+                  onChange={(e) => setActiveTab(e.target.value as any)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="all">전체</option>
+                  <option value="easy">쉬움</option>
+                  <option value="medium">보통</option>
+                  <option value="hard">어려움</option>
+                </select>
               </div>
 
-
-            </form>
-
-            {verified && (
-              <div className="mt-8">
-                <h2 className="text-2xl font-bold text-gray-900 mb-6">영상 미리보기</h2>
-                <div className="bg-blue-50 border-l-4 border-[#4285f4] rounded-r-lg p-4">
-                  <div className="space-y-4">
-                    <div className="w-full aspect-video rounded-lg overflow-hidden bg-black">
-                      <iframe
-                        className="w-full h-full"
-                        ref={iframeRef}
-                        id="yt-preview-player"
-                        src={`https://www.youtube-nocookie.com/embed/${derivedId}?enablejsapi=1&origin=${typeof window !== 'undefined' ? window.location.origin : ''}`}
-                        title="YouTube video player"
-                        frameBorder="0"
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                        referrerPolicy="strict-origin-when-cross-origin"
-                        allowFullScreen
-                      />
+              {/* 카테고리 필터 */}
+              <div className="lg:w-48">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  📁 카테고리
+                </label>
+                <select
+                  value={selectedCategory}
+                  onChange={(e) => setSelectedCategory(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  {categories.map(category => (
+                    <option key={category} value={category}>
+                      {category === 'all' ? '전체' :
+                       category === 'news' ? '뉴스' :
+                       category === 'education' ? '교육' :
+                       category === 'entertainment' ? '엔터테인먼트' :
+                       category === 'culture' ? '문화' :
+                       category === 'technology' ? '기술' :
+                       category === 'business' ? '비즈니스' :
+                       category === 'history' ? '역사' :
+                       category === 'comedy' ? '코미디' :
+                       category === 'documentary' ? '다큐멘터리' : category}
+                    </option>
+                  ))}
+                </select>
                     </div>
 
-                    <div className="flex flex-col sm:flex-row gap-4 items-start">
-                      <div className="w-full sm:w-56">
-                        <img
-                          src={`https://img.youtube.com/vi/${derivedId}/mqdefault.jpg`}
-                          onError={(e) => {
-                            const target = e.currentTarget as HTMLImageElement
-                            target.onerror = null
-                            target.src = 'https://www.youtube.com/s/desktop/fe8e0a7f/img/favicon_144x144.png'
-                          }}
-                          alt="thumbnail"
-                          className="rounded-lg w-full h-auto object-cover"
-                        />
-                      </div>
-                      <div className="flex-1 space-y-2">
-                        <div className="text-lg font-semibold text-gray-900">YouTube 영상</div>
-                        <div className="text-sm text-gray-600">채널: YouTube</div>
-                        <div className="text-sm text-gray-600">
-                          길이: {videoInfo?.durationSeconds ? formatDuration(videoInfo.durationSeconds) : '확인 중...'}
-                          {videoInfo?.durationSeconds != null && hasCaptions != null ? (
-                            videoInfo.durationSeconds <= (hasCaptions ? CAPTION_LIMIT_SECONDS : NO_CAPTION_LIMIT_SECONDS) ? (
-                              <span className="ml-2 text-green-700">({hasCaptions ? '자막 있음: 40분 이하' : '자막 없음: 25분 이하'} 지원)</span>
-                            ) : (
-                              <span className="ml-2 text-red-600">({hasCaptions ? '40분 초과' : '25분 초과'} — 지원 대상 아님)</span>
-                            )
-                          ) : null}
-                        </div>
-
-                        {hasCaptions != null && (
-                          <div className={`${(videoInfo?.durationSeconds || 0) <= (hasCaptions ? CAPTION_LIMIT_SECONDS : NO_CAPTION_LIMIT_SECONDS) ? 'bg-green-50 text-green-800 border-green-200' : 'bg-red-50 text-red-800 border-red-200'} border rounded-md px-3 py-2 text-sm`}>
-                            {hasCaptions ? '유튜브 자막 감지됨' : '유튜브 자막이 감지되지 않았습니다'} — 제한: {hasCaptions ? '40분' : '25분'} 이하
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-6 flex flex-col sm:flex-row gap-3">
-                  {/* 언어 선택 모달이 표시될 때는 버튼 숨김 */}
-                  {!(hasCaptions && availableCaptions.manual.length + availableCaptions.automatic.length > 1) && (
-                    <button
-                      className={styles.button}
-                      disabled={!!(videoInfo?.durationSeconds && hasCaptions != null && videoInfo.durationSeconds > (hasCaptions ? CAPTION_LIMIT_SECONDS : NO_CAPTION_LIMIT_SECONDS))}
-                      onClick={() => navigate('/processing')}
-                    >
-                      통역 연습 생성 시작
-                    </button>
-                  )}
-                  <button
-                    className="px-6 py-3 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                    onClick={() => {
-                      setVerified(false)
-                      setUrl('')
-                      setVideoId('')
-                      setError('')
-                      setShowCaptionModal(false)
-                    }}
-                  >
-                    다른 영상 선택
-                  </button>
-                </div>
+              {/* 태그 필터 */}
+              <div className="lg:w-48">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  🏷️ 태그
+                </label>
+                <select
+                  value={selectedTag}
+                  onChange={(e) => setSelectedTag(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  {tags.slice(0, 20).map(tag => (
+                    <option key={tag} value={tag}>
+                      {tag === 'all' ? '전체' : `#${tag} (${tagCounts[tag]})`}
+                    </option>
+                  ))}
+                </select>
               </div>
-            )}
+
+              {/* 언어 필터 */}
+              <div className="lg:w-48">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  🌐 언어
+                </label>
+                <select
+                  value={selectedLanguage}
+                  onChange={(e) => setSelectedLanguage(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  {languages.map(language => (
+                    <option key={language} value={language}>
+                      {language === 'all' ? '전체' : 
+                       language === 'ko' ? '한국어' :
+                       language === 'zh-CN' ? '중국어' :
+                       language === 'zh' ? '중국어' : language}
+                    </option>
+                  ))}
+                </select>
+              </div>
+                </div>
+
+            {/* 결과 개수 표시 */}
+            <div className="mt-4 text-sm text-gray-600">
+              총 {sortedVideos.length}개의 영상이 있습니다
             </div>
           </div>
 
-          {/* 오른쪽: 추천 영상 리스트 (1.5배 확장) */}
-          <div className="w-[570px] flex-shrink-0">
-            <div className="bg-white rounded-[20px] shadow-2xl p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-bold text-gray-900">🔥 추천 영상</h2>
-                <div className="text-xs text-gray-500">
-                  {recommendedVideos.length}개
-                </div>
-              </div>
-              
-              <div className="mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
-                <p className="text-xs text-gray-700">
-                  ✅ <span className="text-green-600 font-medium">즉시 재생</span> = 별도 과정 없이 클릭만 하면 통역 연습 가능해요<br/>
-                  💡 일반 영상 = URL 입력 후 스크립트 추출 등 과정이 필요해요
-                </p>
-              </div>
-              
-              <div data-tour="recommended" className="space-y-2 max-h-[80vh] overflow-y-auto">
-                {sortVideosByDifficulty(recommendedVideos, 'desc').map((video) => (
+          {/* 추천 영상 그리드 */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {sortedVideos.map((video) => (
                     <RecommendedVideoCard
                       key={video.id}
                       video={video}
                       isFavorite={favoriteIds.includes(video.id)}
                       onToggleFavorite={() => handleToggleFavorite(video.id)}
                       onClick={() => {
-                        if (video.processedData) {
                           // 사전 변환된 데이터가 있으면 바로 결과 페이지로 이동
                           const videoId = video.url.includes('youtu.be/') 
                             ? video.url.split('youtu.be/')[1] 
@@ -570,10 +308,10 @@ export default function YouTubeGenerator() {
                               title: video.title,
                               speaker: video.channel,
                               duration: video.duration,
-                              language: video.processedData.language,
+                      language: video.processedData?.language || 'ko',
                               description: video.url
                             },
-                            segments: video.processedData.segments.map(seg => ({
+                    segments: video.processedData?.segments.map(seg => ({
                               id: seg.id,
                               start_time: seg.start_time || `${Math.floor(seg.start / 60)}:${String(Math.floor(seg.start % 60)).padStart(2, '0')}`,
                               end_time: seg.end_time || `${Math.floor(seg.end / 60)}:${String(Math.floor(seg.end % 60)).padStart(2, '0')}`,
@@ -583,11 +321,11 @@ export default function YouTubeGenerator() {
                               original_text: seg.original_text || seg.text,
                               translation_suggestion: '', // 통역 제안은 비워둠
                               keywords: seg.keywords || []
-                            })),
-                            full_text: video.processedData.text,
+                    })) || [],
+                    full_text: video.processedData?.text || '',
                             files: { audio: '', txt: '', srt: '', vtt: '' },
                             stats: {
-                              total_segments: video.processedData.segments.length,
+                      total_segments: video.processedData?.segments.length || 0,
                               total_duration: video.duration,
                               processing_time: 0
                             }
@@ -596,21 +334,21 @@ export default function YouTubeGenerator() {
                           localStorage.setItem('processingResult', JSON.stringify(formattedData))
                           localStorage.setItem('currentYouTubeUrl', video.url)
                           navigate('/visual-interpretation')
-                        } else {
-                          // 사전 변환된 데이터가 없으면 기존 방식 (URL 입력)
-                          setUrl(video.url)
-                          setVerified(false)
-                        }
                       }}
                     />
                   ))}
               </div>
+
+          {/* 영상이 없을 때 */}
+          {sortedVideos.length === 0 && (
+            <div className="text-center py-12">
+              <div className="text-gray-400 text-6xl mb-4">🔍</div>
+              <h3 className="text-xl font-semibold text-gray-600 mb-2">검색 결과가 없습니다</h3>
+              <p className="text-gray-500">다른 검색어나 필터를 시도해보세요.</p>
             </div>
-          </div>
+          )}
         </div>
-
-
-      </div>
+      </main>
 
       {/* 로그인 모달 */}
       <LoginModal 
@@ -626,26 +364,8 @@ export default function YouTubeGenerator() {
         onToggleFavorite={handleToggleFavorite}
       />
 
-      {/* 언어 선택 모달 */}
-      <CaptionLanguageModal
-        isOpen={showCaptionModal}
-        onClose={() => setShowCaptionModal(false)}
-        onSelectLanguage={(language, type) => {
-          console.log('🌍 선택된 언어:', language, type)
-          localStorage.setItem('selectedCaptionLanguage', language)
-          localStorage.setItem('selectedCaptionType', type)
-          setShowCaptionModal(false)
-          navigate('/processing')
-        }}
-        availableCaptions={availableCaptions}
-      />
-
-      {/* 온보딩 투어 */}
-      <Tour 
-        steps={tourSteps} 
-        visible={showTour} 
-        onClose={closeTour} 
-      />
     </div>
   )
 }
+
+export default YouTubeGenerator

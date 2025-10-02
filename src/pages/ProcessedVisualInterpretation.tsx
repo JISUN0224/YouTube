@@ -1,11 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { extractVideoId } from '../utils/youtube.validation'
 import { auth } from '../firebase'
 // import { db } from '../firebase'  // Firestore 사용 시 활성화
 // import { doc, setDoc } from 'firebase/firestore'  // Firestore 사용 시 활성화
-import { VideoHistoryService } from '../services/videoHistoryService'
 import { addToFavorites, removeFromFavorites, getFavorites } from '../services/favoritesService'
+import { FirebaseLearningService } from '../services/firebaseLearningService'
+import { AnalyticsService } from '../services/analyticsService'
+import { evaluatePronunciation, evaluateContent, combineScores } from '../services/evalService'
+import type { PronunciationScores, ContentScores } from '../services/evalService'
+import RadarChart from '../components/RadarChart'
+import ProsodyAnalysis from '../components/ProsodyAnalysis'
+import { Tour } from '../components/Tour'
 
 declare global {
   interface Window {
@@ -80,20 +85,141 @@ const ProcessedVisualInterpretation: React.FC = () => {
   const [practiceMode, setPracticeMode] = useState<'listen' | 'interpret' | 'review'>('listen')
   const [isAutoMode, setIsAutoMode] = useState(true)
   const [practiceSegmentIndex, setPracticeSegmentIndex] = useState(0)
+  
+  // 학습 시간 및 세션 추적
+  const [sessionStartTime, setSessionStartTime] = useState<number | null>(null)
+  const [totalSessionTime, setTotalSessionTime] = useState(0)
+  const [isSessionActive, setIsSessionActive] = useState(false)
   const [autoDetectionEnabled, setAutoDetectionEnabled] = useState(true)
   const [lastAutoDetectionEnabledTime, setLastAutoDetectionEnabledTime] = useState(0)
   const [hideOriginalText, setHideOriginalText] = useState(false)
+  
+  // 튜토리얼 상태
+  const [showTour, setShowTour] = useState(false)
+
+  // 학습 세션 관리 함수들
+  const startStudySession = () => {
+    const startTime = Date.now()
+    setSessionStartTime(startTime)
+    setIsSessionActive(true)
+    
+    // Analytics 이벤트
+    if (videoInfo?.id) {
+      AnalyticsService.logStudySessionStart(videoInfo.id)
+      AnalyticsService.logTranslationStart(
+        videoInfo.id, 
+        videoInfo.title, 
+        videoInfo.language || 'unknown'
+      )
+    }
+  }
+
+  const endStudySession = async () => {
+    if (sessionStartTime && isSessionActive) {
+      const endTime = Date.now()
+      const sessionDuration = Math.floor((endTime - sessionStartTime) / 1000) // 초 단위
+      
+      // 현재 사용자 ID 가져오기
+      const currentUser = auth.currentUser
+      if (!currentUser) {
+        // 로그인되지 않은 경우 localStorage에 저장
+        const currentTotalTime = parseInt(localStorage.getItem('totalStudyTime') || '0')
+        const newTotalTime = currentTotalTime + sessionDuration
+        localStorage.setItem('totalStudyTime', newTotalTime.toString())
+        
+        const studySessions = JSON.parse(localStorage.getItem('studySessions') || '[]')
+        const newSession = {
+          date: new Date().toISOString(),
+          duration: sessionDuration,
+          videoId: videoInfo?.id || 'unknown',
+          videoTitle: videoInfo?.title || 'Unknown Video',
+          averageScore: evaluationResult?.overall || 85
+        }
+        studySessions.push(newSession)
+        localStorage.setItem('studySessions', JSON.stringify(studySessions))
+      } else {
+        // 로그인된 경우 Firebase에 저장
+        try {
+          const newSession = {
+            date: new Date().toISOString(),
+            duration: sessionDuration,
+            videoId: videoInfo?.id || 'unknown',
+            videoTitle: videoInfo?.title || 'Unknown Video',
+            averageScore: evaluationResult?.overall || 85
+          }
+
+          
+          // Firebase에 학습 세션 추가
+          const sessionResult = await FirebaseLearningService.addStudySession(currentUser.uid, newSession)
+          
+          // 총 학습 시간 업데이트
+          const timeResult = await FirebaseLearningService.updateTotalStudyTime(currentUser.uid, sessionDuration)
+          
+        } catch (error) {
+          // Firebase 저장 실패 시 localStorage에 백업 저장
+          const currentTotalTime = parseInt(localStorage.getItem('totalStudyTime') || '0')
+          const newTotalTime = currentTotalTime + sessionDuration
+          localStorage.setItem('totalStudyTime', newTotalTime.toString())
+        }
+      }
+      
+      // Analytics 이벤트
+      if (videoInfo?.id) {
+        AnalyticsService.logStudySessionEnd(videoInfo.id, sessionDuration)
+      }
+      
+      setTotalSessionTime(prev => prev + sessionDuration)
+      setSessionStartTime(null)
+      setIsSessionActive(false)
+    }
+  }
+
+  const markVideoAsCompleted = async (videoId: string) => {
+    const currentUser = auth.currentUser
+    if (!currentUser) {
+      // 로그인되지 않은 경우 localStorage에 저장
+      const completedVideos = JSON.parse(localStorage.getItem('completedVideos') || '[]')
+      if (!completedVideos.includes(videoId)) {
+        completedVideos.push(videoId)
+        localStorage.setItem('completedVideos', JSON.stringify(completedVideos))
+      }
+    } else {
+      // 로그인된 경우 Firebase에 저장
+      try {
+        await FirebaseLearningService.addCompletedVideo(currentUser.uid, videoId)
+      } catch (error) {
+        // Firebase 저장 실패 시 localStorage에 백업 저장
+        const completedVideos = JSON.parse(localStorage.getItem('completedVideos') || '[]')
+        if (!completedVideos.includes(videoId)) {
+          completedVideos.push(videoId)
+          localStorage.setItem('completedVideos', JSON.stringify(completedVideos))
+        }
+      }
+    }
+  }
 
   // 세션 관리
   const [completedSegments, setCompletedSegments] = useState<number[]>([])
   const [totalScore, setTotalScore] = useState(0)
+  
+  // 통역 범위 선택
+  const [selectedSegments, setSelectedSegments] = useState<number[]>([])
+  
+  // 따옴표 부분을 볼드로 변환하는 헬퍼 함수
+  const highlightQuotes = (text: string) => {
+    if (!text) return text;
+    // '...' 패턴을 <strong>...</strong>로 변환
+    return text.replace(/'([^']+)'/g, '<strong>\'$1\'</strong>');
+  }
   
   // 별점 평가 결과 state 추가
   const [evaluationResult, setEvaluationResult] = useState<{
     accuracy: { stars: number, comment: string }     // 정확도 (1-5별점 + 한줄평)
     completeness: { stars: number, comment: string } // 완성도 (1-5별점 + 한줄평)
     fluency: { stars: number, comment: string }      // 자연스러움 (1-5별점 + 한줄평)
-    overall: number  // 전체 점수 (1-10점)
+    overall: number  // 전체 점수 (1-5점)
+    pronunciation?: PronunciationScores  // Azure 발음 평가
+    content?: ContentScores  // AI 내용 평가
   } | null>(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
 
@@ -139,6 +265,12 @@ const ProcessedVisualInterpretation: React.FC = () => {
           setSegments(processedData.segments)
         }
         const originalUrl = localStorage.getItem('currentYouTubeUrl') || ''
+        // YouTube URL에서 비디오 ID 추출
+        const extractVideoId = (url: string): string | null => {
+          if (!url) return null
+          const match = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/)
+          return match ? match[1] : null
+        }
         const id = extractVideoId(originalUrl || processedData.video_info?.description || '')
         if (id) setYoutubeVideoId(id)
         
@@ -153,7 +285,6 @@ const ProcessedVisualInterpretation: React.FC = () => {
           getFavorites(userId).then(favorites => {
             setIsFavorite(favorites.includes(id))
           }).catch(error => {
-            console.error('즐겨찾기 상태 확인 실패:', error)
           })
         }
         
@@ -162,6 +293,11 @@ const ProcessedVisualInterpretation: React.FC = () => {
         navigate('/youtube-generator')
       } finally {
         setLoading(false)
+        
+        // 데이터 로드 완료 후 학습 세션 시작
+        if (videoInfo) {
+          startStudySession()
+        }
       }
     }
     loadProcessedData()
@@ -172,21 +308,37 @@ const ProcessedVisualInterpretation: React.FC = () => {
     setSyncOffset(0)
   }, [youtubeVideoId])
 
+  // 페이지 언마운트 시 학습 세션 종료
+  useEffect(() => {
+    return () => {
+      if (isSessionActive) {
+        endStudySession()
+      }
+    }
+  }, [isSessionActive])
+
+  // 컴포넌트 마운트 시 튜토리얼 표시 여부 확인
+  useEffect(() => {
+    const hasSeenTour = localStorage.getItem('youtube-interpretation-tour-completed');
+    if (!hasSeenTour) {
+      // 약간의 지연 후 튜토리얼 시작
+      const timer = setTimeout(() => {
+        setShowTour(true);
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, []);
+
   // 즐겨찾기 토글 핸들러 (로그인 기반)
   const handleToggleFavorite = async () => {
     // 즐겨찾기 토글 시작
-    console.log('📋 localStorage 내용:')
-    console.log('  - userId:', localStorage.getItem('userId'))
-    console.log('  - 모든 키:', Object.keys(localStorage))
     
     const userId = localStorage.getItem('userId')
     if (!userId) {
-      console.log('❌ userId가 없음')
       alert('로그인이 필요합니다.')
       return
     }
     
-    console.log('✅ userId 발견:', userId)
     
     if (!currentVideoId) {
       alert('비디오 ID를 찾을 수 없습니다.')
@@ -210,10 +362,45 @@ const ProcessedVisualInterpretation: React.FC = () => {
         }
       }
     } catch (error) {
-      console.error('즐겨찾기 토글 오류:', error)
       alert('즐겨찾기 작업 중 오류가 발생했습니다.')
     }
   }
+
+  // 튜토리얼 닫기 핸들러
+  const handleTourClose = (opts?: { dontShowAgain?: boolean }) => {
+    setShowTour(false);
+    if (opts?.dontShowAgain) {
+      localStorage.setItem('youtube-interpretation-tour-completed', 'true');
+    }
+  };
+
+  // 튜토리얼 스텝 정의
+  const tourSteps = [
+    {
+      id: 'youtube-player',
+      title: '유튜브 영상 시청',
+      description: '여기서 원본 영상을 시청하며 통역 연습을 시작합니다. 영상의 내용을 듣고 이해한 후 통역해보세요.',
+      targetSelector: '.youtube-player-container',
+    },
+    {
+      id: 'subtitle-panel',
+      title: '자막 패널 설정',
+      description: '오른쪽 패널에서 재생 속도와 싱크 오프셋을 조정할 수 있습니다. 자막 스크립트를 확인하고 체크박스로 원하는 세그먼트를 선택하세요.',
+      targetSelector: '.subtitle-panel',
+    },
+    {
+      id: 'pause-mode',
+      title: '자동 일시정지 설정',
+      description: '자동 일시정지 모드를 선택하세요. 문장별은 완전한 문장이 끝날 때, 세그먼트별은 각 구간이 끝날 때 자동으로 멈춥니다.',
+      targetSelector: '.pause-mode-buttons',
+    },
+    {
+      id: 'playback-controls',
+      title: '재생 및 녹음 컨트롤',
+      description: '하단에서 재생을 제어하고, 녹음 버튼을 눌러 통역을 시작하세요. 녹음 후 AI 평가를 받을 수 있습니다.',
+      targetSelector: '.playback-controls',
+    },
+  ];
 
   const formatSecondsToTimeString = (seconds: number): string => {
     const hours = Math.floor(seconds / 3600)
@@ -333,7 +520,6 @@ const ProcessedVisualInterpretation: React.FC = () => {
   const StarRating: React.FC<{ stars: number, maxStars?: number }> = ({ stars, maxStars = 5 }) => {
     // stars 값을 확실히 숫자로 변환
     const numericStars = Number(stars) || 0
-    console.log('🔍 StarRating 디버그:', { stars, numericStars, maxStars, type: typeof stars })
     return (
       <div className="flex gap-1">
         {Array.from({ length: maxStars }, (_, i) => (
@@ -345,12 +531,71 @@ const ProcessedVisualInterpretation: React.FC = () => {
     )
   }
 
-  // 별점 기반 Gemini API 호출 함수
+  // Azure 발음평가 + AI 내용평가 통합 함수
   const evaluateTranslationWithStars = async (originalText: string, userTranslation: string) => {
-    const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY
+    if (!userTranslation.trim()) {
+      return null
+    }
+
+    setIsEvaluating(true)
     
-    if (!GEMINI_API_KEY) {
-      console.warn('Gemini API 키가 설정되지 않았습니다')
+    try {
+      // 통역 언어 결정
+      const videoLanguage = videoInfo?.language || 'zh-CN'
+      const targetLang: 'ko' | 'zh' = (videoLanguage === 'zh-CN' || videoLanguage === 'zh') ? 'ko' : 'zh'
+      
+      
+      // 1. Azure 발음 평가 (audioBlob 있을 때만)
+      let pronunciationScore: PronunciationScores | undefined
+      if (audioBlob) {
+        pronunciationScore = await evaluatePronunciation(audioBlob, userTranslation, targetLang)
+      }
+      
+      // 2. AI 내용 평가 (Gemini/GPT 폴백)
+      const contentScore = await evaluateContent(userTranslation, originalText, targetLang)
+      
+      // 3. 종합 점수 계산 (0-100)
+      const overallScore = combineScores(pronunciationScore, contentScore)
+      
+      // 4. 기존 별점 형식으로 변환 (1-5점 체계)
+      const toStars = (score: number) => Math.max(1, Math.min(5, Math.round(score / 20)))
+      
+      
+      const result = {
+        accuracy: {
+          stars: toStars(contentScore.accuracy),
+          comment: contentScore.accuracyComment || contentScore.summary || `정확도: ${contentScore.accuracy}점`
+        },
+        completeness: {
+          stars: toStars(contentScore.completeness),
+          comment: contentScore.completenessComment || `완성도: ${contentScore.completeness}점`
+        },
+        fluency: {
+          stars: toStars(pronunciationScore?.fluency || contentScore.fluency),
+          comment: contentScore.fluencyComment || (pronunciationScore 
+            ? `발음 유창성: ${pronunciationScore.fluency}점, 내용 자연스러움: ${contentScore.fluency}점`
+            : `자연스러움: ${contentScore.fluency}점`)
+        },
+        overall: Math.round(overallScore / 20), // 0-100 → 0-5
+        pronunciation: pronunciationScore, // 추가 정보
+        content: contentScore // 추가 정보
+      }
+      
+      setIsEvaluating(false)
+      return result
+      
+    } catch (error) {
+      setIsEvaluating(false)
+      return null
+    }
+  }
+
+  // 레거시: 기존 Gemini/GPT 별점 평가 (백업용)
+  const evaluateTranslationWithStarsLegacy = async (originalText: string, userTranslation: string) => {
+    const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY
+    const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY
+    
+    if (!GEMINI_API_KEY && !OPENAI_API_KEY) {
       return null
     }
 
@@ -360,76 +605,165 @@ const ProcessedVisualInterpretation: React.FC = () => {
 
     setIsEvaluating(true)
 
-    try {
-      const prompt = `다음 중국어를 한국어로 통역한 결과를 평가해주세요.
+    // 폴백 모델 순서 (Gemini 4개 + GPT 3개)
+    const models = [
+      { type: 'gemini', name: 'gemini-2.0-flash-exp' },
+      { type: 'gemini', name: 'gemini-1.5-flash-8b' },
+      { type: 'gemini', name: 'gemini-2.0-flash' },
+      { type: 'gemini', name: 'gemini-2.5-flash-lite' },
+      { type: 'gpt', name: 'gpt-4o-mini' },
+      { type: 'gpt', name: 'gpt-3.5-turbo-0125' },
+      { type: 'gpt', name: 'gpt-4.1-mini' }
+    ]
 
-원문: ${originalText}
-통역: ${userTranslation}
+    // 영상 언어에 따라 출발언어와 도착언어 결정
+    const videoLanguage = videoInfo?.language || 'zh-CN'
+    const isChineseToKorean = videoLanguage === 'zh-CN' || videoLanguage === 'zh' || videoLanguage === 'chinese'
+    
+    const sourceLanguage = isChineseToKorean ? '중국어' : '한국어'
+    const targetLanguage = isChineseToKorean ? '한국어' : '중국어'
+    const evaluationType = isChineseToKorean ? '중국어-한국어' : '한국어-중국어'
 
-다음 3가지 항목을 1-5점 별점으로 평가하고 각각 1-2문장 피드백을 주세요:
+    const prompt = `당신은 ${evaluationType} 통역 평가 전문가입니다. 다음 통역 결과를 공정하고 정확하게 평가해주세요.
+
+**원문 (${sourceLanguage}):** ${originalText}
+**통역 결과 (${targetLanguage}):** ${userTranslation}
 
 **평가 기준:**
-1. **정확도 (accuracy)**: 원문의 의미를 정확히 번역했는지 평가
-2. **완성도 (completeness)**: 원문의 모든 내용이 번역에 포함되었는지 평가  
-3. **자연스러움 (fluency)**: 원문의 맥락과 의미를 고려했을 때 한국어로 자연스럽게 표현되었는지 평가
-   - 원문과 전혀 관련없는 내용이면 1점
-   - 단어 자체가 자연스러워도 맥락이 맞지 않으면 낮은 점수
+1. **정확도 (accuracy)**: 
+   - 5점: 의미가 완전히 정확함
+   - 4점: 의미가 거의 정확함 (미세한 차이)
+   - 3점: 대체로 정확함 (일부 오해)
+   - 2점: 부분적으로 정확함 (중요한 오류)
+   - 1점: 전혀 정확하지 않음
+
+2. **완성도 (completeness)**:
+   - 5점: 모든 내용이 완전히 번역됨
+   - 4점: 거의 모든 내용이 번역됨
+   - 3점: 대부분의 내용이 번역됨
+   - 2점: 일부 내용만 번역됨
+   - 1점: 매우 적은 내용만 번역됨
+
+3. **자연스러움 (fluency)**:
+   - 5점: 매우 자연스러운 ${targetLanguage}
+   - 4점: 자연스러운 ${targetLanguage}
+   - 3점: 대체로 자연스러움
+   - 2점: 어색한 부분 있음
+   - 1점: 매우 어색함
+
+**중요:** 
+- 과학, 역사, 문화 등 전문 용어는 정확한 의미로 번역되었는지 중점적으로 평가하세요.
+- ${sourceLanguage}에서 ${targetLanguage}로의 자연스러운 표현을 고려하세요.
+- 문화적 맥락과 언어적 특성을 반영한 번역인지 평가하세요.
 
 JSON 형식으로만 응답:
 {
   "accuracy": {
-    "stars": 1-5점,
-    "comment": "정확도 피드백(1-2문장)"
+    "stars": 1-5,
+    "comment": "정확도 평가 및 구체적인 이유"
   },
   "completeness": {
-    "stars": 1-5점, 
-    "comment": "완성도 피드백(1-2문장)"
+    "stars": 1-5,
+    "comment": "완성도 평가 및 누락된 부분"
   },
   "fluency": {
-    "stars": 1-5점,
-    "comment": "자연스러움 피드백(1-2문장)"
+    "stars": 1-5,
+    "comment": "자연스러움 평가 및 개선점"
   },
-  "overall": 1-10점
+  "overall": 1-10
 }`
 
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{ text: prompt }]
-          }],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 800,
-          }
-        })
-      })
-
-      if (!response.ok) {
-        throw new Error(`Gemini API 오류: ${response.status}`)
-      }
-
-      const data = await response.json()
-      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+    // 각 모델을 순차적으로 시도
+    for (let i = 0; i < models.length; i++) {
+      const model = models[i]
       
-      // JSON 추출
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/)
-      if (jsonMatch) {
-        const evaluation = JSON.parse(jsonMatch[0])
-        return evaluation
-      } else {
-        throw new Error('유효한 JSON 응답을 받지 못했습니다')
-      }
+      // Gemini 모델은 API 키가 있을 때만, GPT 모델은 OpenAI API 키가 있을 때만 시도
+      if (model.type === 'gemini' && !GEMINI_API_KEY) continue
+      if (model.type === 'gpt' && !OPENAI_API_KEY) continue
+      
+      try {
+        
+        let response: Response
+        let responseText = ''
+        
+        if (model.type === 'gemini') {
+          // Gemini API 호출
+          response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model.name}:generateContent?key=${GEMINI_API_KEY}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              contents: [{
+                parts: [{ text: prompt }]
+              }],
+              generationConfig: {
+                temperature: 0.3,
+                maxOutputTokens: 800,
+              }
+            })
+          })
 
-    } catch (error) {
-      console.error('Gemini 평가 실패:', error)
-      return null
-    } finally {
-      setIsEvaluating(false)
+          if (!response.ok) {
+            throw new Error(`Gemini API 오류 (${model.name}): ${response.status}`)
+          }
+
+          const data = await response.json()
+          responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || ''
+          
+        } else if (model.type === 'gpt') {
+          // GPT (OpenAI) API 호출
+          response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${OPENAI_API_KEY}`
+            },
+            body: JSON.stringify({
+              model: model.name,
+              messages: [
+                { role: 'system', content: '당신은 통역 평가 전문가입니다. JSON 형식으로만 응답하세요.' },
+                { role: 'user', content: prompt }
+              ],
+              temperature: 0.3,
+              max_tokens: 800,
+              response_format: { type: 'json_object' }
+            })
+          })
+
+          if (!response.ok) {
+            throw new Error(`OpenAI API 오류 (${model.name}): ${response.status}`)
+          }
+
+          const data = await response.json()
+          responseText = data.choices?.[0]?.message?.content || ''
+        }
+        
+        // JSON 추출 및 파싱
+        const jsonMatch = responseText.match(/\{[\s\S]*\}/)
+        if (jsonMatch) {
+          const evaluation = JSON.parse(jsonMatch[0])
+          setIsEvaluating(false) // 평가 완료
+          return evaluation
+        } else {
+          throw new Error(`유효한 JSON 응답을 받지 못했습니다 (${model.name})`)
+        }
+
+      } catch (error) {
+        
+        // 마지막 모델까지 실패한 경우
+        if (i === models.length - 1) {
+          setIsEvaluating(false) // 평가 실패
+          return null
+        }
+        
+        // 다음 모델로 계속 시도
+        continue
+      }
     }
+
+    setIsEvaluating(false) // 모든 시도 실패
+    return null
   }
 
 
@@ -523,7 +857,7 @@ JSON 형식으로만 응답:
         
         const segmentIndex = findCurrentSegmentIndex(time);
         if (segmentIndex !== -1 && segmentIndex !== currentScript) {
-          console.log(`🔄 현재 세그먼트 변경: ${currentScript} → ${segmentIndex} (시간: ${time.toFixed(2)}초)`);
+          // 현재 세그먼트 변경
           setCurrentScript(segmentIndex);
         }
         
@@ -540,7 +874,7 @@ JSON 형식으로만 응답:
             if (timeSinceAutoDetectionEnabled > 1000) {
               if (pauseMode === 'segment') {
                 player.pauseVideo();
-                console.log(`세그먼트 ${currentScript + 1} 종료 - 자동 일시정지`);
+                // 세그먼트 종료 - 자동 일시정지
                 
                 if (isAutoMode) {
                   setPracticeSegmentIndex(currentScript);
@@ -549,7 +883,7 @@ JSON 형식으로만 응답:
               } else if (pauseMode === 'sentence') {
                 if (isCompleteSentence(currentSegment.original_text)) {
                   player.pauseVideo();
-                  console.log(`완전한 문장 종료 (세그먼트 ${currentScript + 1}) - 자동 일시정지`);
+                  // 완전한 문장 종료 - 자동 일시정지
                   
                   if (isAutoMode) {
                     setPracticeSegmentIndex(currentScript);
@@ -592,6 +926,11 @@ JSON 형식으로만 응답:
   const startRecording = async () => {
     try {
       if (isRecordingRef.current) return
+      
+      // 학습 세션 시작 (녹음 시작 시)
+      if (!isSessionActive) {
+        startStudySession()
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
       const mr = new MediaRecorder(stream)
@@ -614,7 +953,20 @@ JSON 형식으로만 응답:
       if (Rec) {
         const rec = new Rec()
         recognitionRef.current = rec
-        rec.lang = 'ko-KR'
+        
+        // 영상 언어에 따라 음성 인식 언어 자동 설정
+        const videoLanguage = videoInfo?.language || 'zh-CN'
+        if (videoLanguage === 'zh-CN' || videoLanguage === 'zh') {
+          // 중국어 영상이면 한국어로 통역 (한국어 음성 인식)
+          rec.lang = 'ko-KR'
+        } else if (videoLanguage === 'ko') {
+          // 한국어 영상이면 중국어로 통역 (중국어 음성 인식)
+          rec.lang = 'zh-CN'
+        } else {
+          // 기본값은 한국어
+          rec.lang = 'ko-KR'
+        }
+        
         rec.interimResults = true
         rec.continuous = true
         rec.onresult = (ev: any) => {
@@ -746,7 +1098,7 @@ JSON 형식으로만 응답:
                 <audio ref={userAudioRef} style={{ display: 'none' }} />
                 <audio ref={modelAudioRef} style={{ display: 'none' }} />
 
-                <div className="w-full h-96 rounded-xl overflow-hidden bg-black relative">
+                <div className="w-full h-96 rounded-xl overflow-hidden bg-black relative youtube-player-container">
                   <div id="youtube-player" className="w-full h-full"></div>
                   {!youtubeAPIReady && !playerError && (
                     <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-80">
@@ -788,7 +1140,7 @@ JSON 형식으로만 응답:
               {/* 자동 일시정지 */}
               <div className="mb-6">
                 <h4 className="text-lg font-semibold text-gray-900 mb-3">⏸️ 자동 일시정지 설정</h4>
-                <div className="flex gap-3">
+                <div className="flex gap-3 pause-mode-buttons">
                   <button onClick={() => setPauseMode('sentence')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${pauseMode === 'sentence' ? 'bg-green-500 text-white border-2 border-green-500' : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-green-500'}`}>🧠 문장별 (추천)</button>
                   <button onClick={() => setPauseMode('segment')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${pauseMode === 'segment' ? 'bg-yellow-500 text-white border-2 border-yellow-500' : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-yellow-500'}`}>⏱️ 세그먼트별</button>
                   <button onClick={() => setPauseMode('manual')} className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${pauseMode === 'manual' ? 'bg-gray-500 text-white border-2 border-gray-500' : 'bg-white text-gray-700 border-2 border-gray-300 hover:border-gray-500'}`}>🎛️ 수동 제어</button>
@@ -802,7 +1154,7 @@ JSON 형식으로만 응답:
 
               {/* 듣기 모드 */}
               {practiceMode === 'listen' && (
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 mb-6">
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-6 mb-6 playback-controls">
                   <h4 className="text-lg font-semibold text-blue-800 mb-4 flex items-center gap-2"><span>🔊</span> 원문 듣기 단계</h4>
                   <div className="flex justify-center mb-4">
                     <button onClick={() => { if (player && segments[currentScript]) { const s = getTimeWithOffset(segments[currentScript].start_time || segments[currentScript].start); player.seekTo(s); player.playVideo(); setLastAutoDetectionEnabledTime(Date.now()) } }} disabled={!player || segments.length === 0} className={`w-24 h-24 rounded-full text-4xl font-bold transition-all duration-300 shadow-lg flex items-center justify-center ${!player || segments.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : isPlaying ? 'bg-orange-500 text-white hover:bg-orange-600 animate-pulse' : 'bg-blue-500 text-white hover:bg-blue-600 hover:scale-105'}`} style={{ lineHeight: '1' }}>{isPlaying ? '⏸️' : '▶️'}</button>
@@ -816,17 +1168,27 @@ JSON 형식으로만 응답:
 
               {/* 통역 모드 */}
               {practiceMode === 'interpret' && (
-                <div className="bg-red-50 border border-red-200 rounded-xl p-6 mb-6">
+                <div className="bg-red-50 border border-red-200 rounded-xl p-6 mb-6 playback-controls">
                   <h4 className="text-lg font-semibold text-red-800 mb-4 flex items-center gap-2"><span>🎙️</span> 통역 녹음 단계</h4>
                   <div className="flex justify-center mb-4">
                     <button onClick={() => { if (isRecording) { stopRecording() } else { void startRecording() } }} className={`w-24 h-24 rounded-full text-4xl font-bold transition-all duration-300 shadow-lg flex items-center justify-center ${isRecording ? 'bg-red-600 text-white animate-pulse hover:bg-red-700' : 'bg-red-500 text-white hover:bg-red-600 hover:scale-105'}`} style={{ lineHeight: '1' }}>{isRecording ? '⏹️' : '🎙️'}</button>
                   </div>
                   <div className="text-center mb-6">
                     <div className="text-3xl font-mono font-bold text-red-600 mb-2">{Math.floor(recordingTime / 60)}:{(recordingTime % 60).toString().padStart(2, '0')}</div>
-                    <div className="text-gray-600">{isRecording ? '녹음 중... 한국어로 통역해주세요' : '녹음 시작하기'}</div>
+                    <div className="text-gray-600">
+                      {isRecording ? 
+                        (videoInfo?.language === 'ko' ? 
+                          '녹음 중... 중국어로 통역해주세요' : 
+                          '녹음 중... 한국어로 통역해주세요'
+                        ) : 
+                        '녹음 시작하기'
+                      }
+                    </div>
                   </div>
                   <div className="bg-white border-2 border-red-200 rounded-xl p-4 min-h-[100px]">
-                    <div className="text-sm font-medium text-red-700 mb-2">실시간 음성 인식 결과:</div>
+                    <div className="text-sm font-medium text-red-700 mb-2">
+                      실시간 음성 인식 결과 ({videoInfo?.language === 'ko' ? '중국어' : '한국어'}):
+                    </div>
                     {(accumulatedText || currentText) ? (
                       <div className="text-lg text-gray-800 leading-relaxed"><span className="font-medium">{accumulatedText}</span> <span className="text-gray-500 italic">{currentText}</span></div>
                     ) : (
@@ -840,19 +1202,60 @@ JSON 형식으로만 응답:
                     {(accumulatedText.trim() || currentText.trim()) && (
                       <button 
                         onClick={async () => {
-                          if (segments[practiceSegmentIndex]) {
-                            const originalText = segments[practiceSegmentIndex].original_text || ''
-                            const userTranslation = accumulatedText.trim() + ' ' + currentText.trim()
-                            const evaluation = await evaluateTranslationWithStars(originalText, userTranslation.trim())
-                            if (evaluation) {
-                              setEvaluationResult(evaluation)
-                              console.log('📊 통역 평가 완료:', evaluation)
-                            }
+                          // 선택된 세그먼트들의 원문을 합치기
+                          let originalText = '';
+                          if (selectedSegments.length > 0) {
+                            // 사용자가 선택한 세그먼트들의 텍스트 합치기
+                            originalText = selectedSegments
+                              .map(idx => segments[idx]?.original_text || '')
+                              .join(' ');
+                          } else {
+                            // 선택 안했으면 현재 세그먼트만
+                            originalText = segments[practiceSegmentIndex]?.original_text || '';
                           }
+                          
+                          const userTranslation = accumulatedText.trim() + ' ' + currentText.trim();
+                          const evaluation = await evaluateTranslationWithStars(originalText, userTranslation.trim());
+                          
+                          if (evaluation) {
+                            setEvaluationResult(evaluation)
+                              
+                              // Analytics 이벤트
+                              if (videoInfo?.id) {
+                                AnalyticsService.logAIEvaluation(
+                                  videoInfo.id,
+                                  evaluation.accuracy.stars,
+                                  evaluation.completeness.stars,
+                                  evaluation.fluency.stars,
+                                  evaluation.overall
+                                )
+                                AnalyticsService.logTranslationComplete(
+                                  videoInfo.id,
+                                  evaluation.overall,
+                                  totalSessionTime,
+                                  videoInfo.language || 'unknown'
+                                )
+                              }
+                              
+                              // AI 평가 완료 시 학습 세션 종료 (먼저 실행)
+                              if (isSessionActive) {
+                                await endStudySession()
+                              }
+                              
+                              // AI 평가 완료 시 영상을 완료로 기록
+                              if (videoInfo?.id) {
+                                markVideoAsCompleted(videoInfo.id)
+                              }
+                            }
                         }}
-                        className="flex-1 py-3 px-4 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors"
+                        className="flex-1 py-3 px-4 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors flex flex-col items-center"
                       >
-                        🤖 AI 평가받기
+                        <span>🤖 AI 평가받기</span>
+                        {selectedSegments.length > 0 && (
+                          <span className="text-xs mt-1 opacity-90">
+                            ({selectedSegments.length}개 세그먼트 평가)
+                          </span>
+                        )}
                       </button>
                     )}
 
@@ -879,11 +1282,11 @@ JSON 형식으로만 응답:
                           🤖 AI 평가 결과
                         </h5>
                         <div className={`text-xl font-bold px-3 py-1 rounded-full ${
-                          evaluationResult.overall >= 8 ? 'bg-green-100 text-green-700' :
-                          evaluationResult.overall >= 6 ? 'bg-yellow-100 text-yellow-700' :
+                          evaluationResult.overall >= 4 ? 'bg-green-100 text-green-700' :
+                          evaluationResult.overall >= 3 ? 'bg-yellow-100 text-yellow-700' :
                           'bg-red-100 text-red-700'
                         }`}>
-                          {evaluationResult.overall}/10
+                          {evaluationResult.overall}/5
                         </div>
                       </div>
 
@@ -898,7 +1301,7 @@ JSON 형식으로만 응답:
                               <span className="text-sm text-gray-600">({evaluationResult.accuracy.stars}/5)</span>
                             </div>
                           </div>
-                          <p className="text-sm text-gray-700">{evaluationResult.accuracy.comment}</p>
+                          <p className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: highlightQuotes(evaluationResult.accuracy.comment) }}></p>
                         </div>
 
                         {/* 완성도 */}
@@ -910,7 +1313,7 @@ JSON 형식으로만 응답:
                               <span className="text-sm text-gray-600">({evaluationResult.completeness.stars}/5)</span>
                             </div>
                           </div>
-                          <p className="text-sm text-gray-700">{evaluationResult.completeness.comment}</p>
+                          <p className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: highlightQuotes(evaluationResult.completeness.comment) }}></p>
                         </div>
 
                         {/* 자연스러움 */}
@@ -922,8 +1325,85 @@ JSON 형식으로만 응답:
                               <span className="text-sm text-gray-600">({evaluationResult.fluency.stars}/5)</span>
                             </div>
                           </div>
-                          <p className="text-sm text-gray-700">{evaluationResult.fluency.comment}</p>
+                          <p className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: highlightQuotes(evaluationResult.fluency.comment) }}></p>
                         </div>
+                        
+                        {/* Azure 발음 평가 상세 (있을 때만) */}
+                        {evaluationResult.pronunciation && evaluationResult.pronunciation.source === 'azure' && (
+                          <div className="bg-white rounded-lg p-3 border border-purple-100">
+                            <div className="mb-3">
+                              <span className="font-medium text-purple-700">🎤 Azure 발음 평가</span>
+                            </div>
+                            
+                            {/* 사각형 레이더 차트 */}
+                            <RadarChart 
+                              accuracy={evaluationResult.pronunciation.accuracy}
+                              fluency={evaluationResult.pronunciation.fluency}
+                              prosody={evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 
+                                ? evaluationResult.pronunciation.words.reduce((sum, word) => sum + word.accuracy, 0) / evaluationResult.pronunciation.words.length 
+                                : 0}
+                              confidence={Math.max(0, 100 - (evaluationResult.pronunciation.longPauses?.length || 0) * 10)}
+                            />
+                            
+                            <div className="space-y-2 text-sm mb-3">
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">정확도:</span>
+                                <span className="font-medium">{evaluationResult.pronunciation.accuracy}점</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">유창성:</span>
+                                <span className="font-medium">{evaluationResult.pronunciation.fluency}점</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">운율:</span>
+                                <span className="font-medium">{evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 
+                                  ? Math.round(evaluationResult.pronunciation.words.reduce((sum, word) => sum + word.accuracy, 0) / evaluationResult.pronunciation.words.length)
+                                  : 0}점</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">자신감:</span>
+                                <span className="font-medium">{Math.max(0, 100 - (evaluationResult.pronunciation.longPauses?.length || 0) * 10)}점</span>
+                              </div>
+                              {evaluationResult.pronunciation.longPauses && evaluationResult.pronunciation.longPauses.length > 0 && (
+                                <div className="text-xs text-orange-600 mt-2">
+                                  ⚠️ 긴 멈춤 {evaluationResult.pronunciation.longPauses.length}회 감지됨
+                                </div>
+                              )}
+                            </div>
+                            
+                            {/* 단어별 발음 점수 */}
+                            {evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 && (
+                              <div className="mt-3 pt-3 border-t border-purple-100">
+                                <div className="text-xs font-medium text-gray-700 mb-2">📝 단어별 발음 분석:</div>
+                                <div className="flex flex-wrap gap-2">
+                                  {evaluationResult.pronunciation.words.map((word, idx) => (
+                                    <span
+                                      key={idx}
+                                      className={`px-2 py-1 rounded text-xs ${
+                                        word.accuracy >= 80 ? 'bg-green-100 text-green-700' :
+                                        word.accuracy >= 60 ? 'bg-yellow-100 text-yellow-700' :
+                                        'bg-red-100 text-red-700'
+                                      }`}
+                                      title={`정확도: ${word.accuracy}점${word.errorType ? ` (${word.errorType})` : ''}`}
+                                    >
+                                      {word.word} <span className="font-medium">{word.accuracy}</span>
+                                    </span>
+                                  ))}
+                                </div>
+                                {evaluationResult.pronunciation.words.filter(w => w.accuracy < 80).length > 0 && (
+                                  <div className="text-xs text-orange-600 mt-2">
+                                    💡 개선 필요: {evaluationResult.pronunciation.words.filter(w => w.accuracy < 80).map(w => `'${w.word}'(${w.accuracy}점)`).join(', ')}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            
+                            {/* 운율 분석 */}
+                            {evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 && (
+                              <ProsodyAnalysis words={evaluationResult.pronunciation.words} />
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       {/* 다시 평가받기 버튼 */}
@@ -931,13 +1411,31 @@ JSON 형식으로만 응답:
                         <button
                           onClick={async () => {
                             setEvaluationResult(null)
-                            if (segments[practiceSegmentIndex]) {
-                              const originalText = segments[practiceSegmentIndex].original_text || ''
+                            // 선택된 세그먼트들의 원문을 합치기
+                            let originalText = '';
+                            if (selectedSegments.length > 0) {
+                              originalText = selectedSegments
+                                .map(idx => segments[idx]?.original_text || '')
+                                .join(' ');
+                            } else if (segments[practiceSegmentIndex]) {
+                              originalText = segments[practiceSegmentIndex].original_text || '';
+                            }
+                            
+                            if (originalText) {
                               const userTranslation = accumulatedText.trim() + ' ' + currentText.trim()
                               const evaluation = await evaluateTranslationWithStars(originalText, userTranslation.trim())
                               if (evaluation) {
                                 setEvaluationResult(evaluation)
-                                console.log('📊 통역 재평가 완료:', evaluation)
+                                
+                                // AI 평가 완료 시 학습 세션 종료 (먼저 실행)
+                                if (isSessionActive) {
+                                  await endStudySession()
+                                }
+                                
+                                // AI 평가 완료 시 영상을 완료로 기록
+                                if (videoInfo?.id) {
+                                  markVideoAsCompleted(videoInfo.id)
+                                }
                               }
                             }
                           }}
@@ -978,23 +1476,46 @@ JSON 형식으로만 응답:
                         <button
                           onClick={async () => {
                             const finalTranslation = recordedSegments[practiceSegmentIndex] || accumulatedText || ''
-                            if (finalTranslation.trim() && segments[practiceSegmentIndex]) {
-                              const originalText = segments[practiceSegmentIndex].original_text || ''
+                            if (finalTranslation.trim()) {
+                              // 선택된 세그먼트들의 원문을 합치기
+                              let originalText = '';
+                              if (selectedSegments.length > 0) {
+                                originalText = selectedSegments
+                                  .map(idx => segments[idx]?.original_text || '')
+                                  .join(' ');
+                              } else if (segments[practiceSegmentIndex]) {
+                                originalText = segments[practiceSegmentIndex].original_text || '';
+                              }
+                              
                               const evaluation = await evaluateTranslationWithStars(originalText, finalTranslation.trim())
                               if (evaluation) {
                                 setEvaluationResult(evaluation)
-                                console.log('📊 통역 평가 완료:', evaluation)
+                                
+                                // AI 평가 완료 시 학습 세션 종료 (먼저 실행)
+                                if (isSessionActive) {
+                                  await endStudySession()
+                                }
+                                
+                                // AI 평가 완료 시 영상을 완료로 기록
+                                if (videoInfo?.id) {
+                                  markVideoAsCompleted(videoInfo.id)
+                                }
                               }
                             }
                           }}
                           disabled={!recordedSegments[practiceSegmentIndex] && !accumulatedText.trim()}
-                          className={`px-6 py-3 rounded-lg font-medium transition-all ${
+                          className={`px-6 py-3 rounded-lg font-medium transition-all flex flex-col items-center ${
                             !recordedSegments[practiceSegmentIndex] && !accumulatedText.trim()
                               ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                               : 'bg-purple-500 text-white hover:bg-purple-600 hover:scale-105'
                           }`}
                         >
-                          🎯 AI 평가받기
+                          <span>🎯 AI 평가받기</span>
+                          {selectedSegments.length > 0 && (
+                            <span className="text-xs mt-1 opacity-90">
+                              ({selectedSegments.length}개 세그먼트 평가)
+                            </span>
+                          )}
                         </button>
                       </div>
                     </div>
@@ -1019,11 +1540,11 @@ JSON 형식으로만 응답:
                           🤖 AI 평가 결과
                         </h5>
                         <div className={`text-xl font-bold px-3 py-1 rounded-full ${
-                          evaluationResult.overall >= 8 ? 'bg-green-100 text-green-700' :
-                          evaluationResult.overall >= 6 ? 'bg-yellow-100 text-yellow-700' :
+                          evaluationResult.overall >= 4 ? 'bg-green-100 text-green-700' :
+                          evaluationResult.overall >= 3 ? 'bg-yellow-100 text-yellow-700' :
                           'bg-red-100 text-red-700'
                         }`}>
-                          {evaluationResult.overall}/10
+                          {evaluationResult.overall}/5
                         </div>
                       </div>
 
@@ -1035,7 +1556,7 @@ JSON 형식으로만 응답:
                             <span className="font-medium text-red-700">📍 정확도</span>
                             <StarRating stars={evaluationResult.accuracy.stars} />
                           </div>
-                          <p className="text-sm text-gray-700">{evaluationResult.accuracy.comment}</p>
+                          <p className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: highlightQuotes(evaluationResult.accuracy.comment) }}></p>
                         </div>
 
                         {/* 완성도 */}
@@ -1044,7 +1565,7 @@ JSON 형식으로만 응답:
                             <span className="font-medium text-green-700">✅ 완성도</span>
                             <StarRating stars={evaluationResult.completeness.stars} />
                           </div>
-                          <p className="text-sm text-gray-700">{evaluationResult.completeness.comment}</p>
+                          <p className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: highlightQuotes(evaluationResult.completeness.comment) }}></p>
                         </div>
 
                         {/* 자연스러움 */}
@@ -1053,8 +1574,85 @@ JSON 형식으로만 응답:
                             <span className="font-medium text-blue-700">💫 자연스러움</span>
                             <StarRating stars={evaluationResult.fluency.stars} />
                           </div>
-                          <p className="text-sm text-gray-700">{evaluationResult.fluency.comment}</p>
+                          <p className="text-sm text-gray-700" dangerouslySetInnerHTML={{ __html: highlightQuotes(evaluationResult.fluency.comment) }}></p>
                         </div>
+                        
+                        {/* Azure 발음 평가 상세 (있을 때만) */}
+                        {evaluationResult.pronunciation && evaluationResult.pronunciation.source === 'azure' && (
+                          <div className="bg-white rounded-lg p-3 border border-purple-100">
+                            <div className="mb-3">
+                              <span className="font-medium text-purple-700">🎤 Azure 발음 평가</span>
+                            </div>
+                            
+                            {/* 사각형 레이더 차트 */}
+                            <RadarChart 
+                              accuracy={evaluationResult.pronunciation.accuracy}
+                              fluency={evaluationResult.pronunciation.fluency}
+                              prosody={evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 
+                                ? evaluationResult.pronunciation.words.reduce((sum, word) => sum + word.accuracy, 0) / evaluationResult.pronunciation.words.length 
+                                : 0}
+                              confidence={Math.max(0, 100 - (evaluationResult.pronunciation.longPauses?.length || 0) * 10)}
+                            />
+                            
+                            <div className="space-y-2 text-sm mb-3">
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">정확도:</span>
+                                <span className="font-medium">{evaluationResult.pronunciation.accuracy}점</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">유창성:</span>
+                                <span className="font-medium">{evaluationResult.pronunciation.fluency}점</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">운율:</span>
+                                <span className="font-medium">{evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 
+                                  ? Math.round(evaluationResult.pronunciation.words.reduce((sum, word) => sum + word.accuracy, 0) / evaluationResult.pronunciation.words.length)
+                                  : 0}점</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-gray-600">자신감:</span>
+                                <span className="font-medium">{Math.max(0, 100 - (evaluationResult.pronunciation.longPauses?.length || 0) * 10)}점</span>
+                              </div>
+                              {evaluationResult.pronunciation.longPauses && evaluationResult.pronunciation.longPauses.length > 0 && (
+                                <div className="text-xs text-orange-600 mt-2">
+                                  ⚠️ 긴 멈춤 {evaluationResult.pronunciation.longPauses.length}회 감지됨
+                                </div>
+                              )}
+                            </div>
+                            
+                            {/* 단어별 발음 점수 */}
+                            {evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 && (
+                              <div className="mt-3 pt-3 border-t border-purple-100">
+                                <div className="text-xs font-medium text-gray-700 mb-2">📝 단어별 발음 분석:</div>
+                                <div className="flex flex-wrap gap-2">
+                                  {evaluationResult.pronunciation.words.map((word, idx) => (
+                                    <span
+                                      key={idx}
+                                      className={`px-2 py-1 rounded text-xs ${
+                                        word.accuracy >= 80 ? 'bg-green-100 text-green-700' :
+                                        word.accuracy >= 60 ? 'bg-yellow-100 text-yellow-700' :
+                                        'bg-red-100 text-red-700'
+                                      }`}
+                                      title={`정확도: ${word.accuracy}점${word.errorType ? ` (${word.errorType})` : ''}`}
+                                    >
+                                      {word.word} <span className="font-medium">{word.accuracy}</span>
+                                    </span>
+                                  ))}
+                                </div>
+                                {evaluationResult.pronunciation.words.filter(w => w.accuracy < 80).length > 0 && (
+                                  <div className="text-xs text-orange-600 mt-2">
+                                    💡 개선 필요: {evaluationResult.pronunciation.words.filter(w => w.accuracy < 80).map(w => `'${w.word}'(${w.accuracy}점)`).join(', ')}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            
+                            {/* 운율 분석 */}
+                            {evaluationResult.pronunciation.words && evaluationResult.pronunciation.words.length > 0 && (
+                              <ProsodyAnalysis words={evaluationResult.pronunciation.words} />
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       {/* 다시 평가받기 버튼 */}
@@ -1063,12 +1661,30 @@ JSON 형식으로만 응답:
                           onClick={async () => {
                             setEvaluationResult(null)
                             const finalTranslation = recordedSegments[practiceSegmentIndex] || accumulatedText || ''
-                            if (finalTranslation.trim() && segments[practiceSegmentIndex]) {
-                              const originalText = segments[practiceSegmentIndex].original_text || ''
+                            if (finalTranslation.trim()) {
+                              // 선택된 세그먼트들의 원문을 합치기
+                              let originalText = '';
+                              if (selectedSegments.length > 0) {
+                                originalText = selectedSegments
+                                  .map(idx => segments[idx]?.original_text || '')
+                                  .join(' ');
+                              } else if (segments[practiceSegmentIndex]) {
+                                originalText = segments[practiceSegmentIndex].original_text || '';
+                              }
+                              
                               const evaluation = await evaluateTranslationWithStars(originalText, finalTranslation.trim())
                               if (evaluation) {
                                 setEvaluationResult(evaluation)
-                                console.log('📊 통역 재평가 완료:', evaluation)
+                                
+                                // AI 평가 완료 시 학습 세션 종료 (먼저 실행)
+                                if (isSessionActive) {
+                                  await endStudySession()
+                                }
+                                
+                                // AI 평가 완료 시 영상을 완료로 기록
+                                if (videoInfo?.id) {
+                                  markVideoAsCompleted(videoInfo.id)
+                                }
                               }
                             }
                           }}
@@ -1123,9 +1739,15 @@ JSON 형식으로만 응답:
                           const start = getTimeWithOffset(segments[nextIndex].start_time || segments[nextIndex].start); 
                           player.seekTo(start); 
                           player.playVideo(); 
-                          setTimeout(() => setAutoDetectionEnabled(true), 1000) 
+                          setTimeout(() => {
+                            setAutoDetectionEnabled(true);
+                            setLastAutoDetectionEnabledTime(Date.now());
+                          }, 1000) 
                         } else { 
-                          setTimeout(() => setAutoDetectionEnabled(true), 500) 
+                          setTimeout(() => {
+                            setAutoDetectionEnabled(true);
+                            setLastAutoDetectionEnabledTime(Date.now());
+                          }, 500) 
                         } 
                       } 
                     }} disabled={practiceSegmentIndex >= segments.length - 1} className={`flex-1 py-3 px-4 rounded-lg transition-colors ${practiceSegmentIndex >= segments.length - 1 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-500 text-white hover:bg-green-600'}`}>➡️ 다음 세그먼트</button>
@@ -1147,7 +1769,7 @@ JSON 형식으로만 응답:
             </div>
 
             {/* 오른쪽: 연습 설정 및 자막 패널 */}
-            <div className="bg-white rounded-2xl p-6 shadow-lg">
+            <div className="bg-white rounded-2xl p-6 shadow-lg subtitle-panel">
               {/* 통역 설정 */}
               <div className="mb-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">⚙️ 통역 설정</h3>
@@ -1189,35 +1811,96 @@ JSON 형식으로만 응답:
 
               {/* 자막 스크립트 */}
               <div>
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">📝 자막 스크립트</h3>
-                <div ref={scriptContainerRef} className="h-[28rem] overflow-y-auto border-2 border-gray-300 rounded-lg p-4 bg-gray-50 overscroll-contain">
-                  {segments.map((segment, index) => (
-                    <div key={segment.id} onClick={() => { 
-                      setPracticeMode('listen'); 
-                      setPracticeSegmentIndex(index); 
-                      setCurrentScript(index); 
-                      setAccumulatedText(''); 
-                      setCurrentText(''); 
-                      setRecordingTime(0); 
-                      setEvaluationResult(null); // 평가 결과도 초기화
-                      if (player) { 
-                        const startTime = getTimeWithOffset(segment.start_time || segment.start); 
-                        setLastAutoDetectionEnabledTime(Date.now()); 
-                        player.seekTo(startTime); 
-                        player.playVideo() 
-                      } 
-                    }} className={`p-3 mb-2 rounded cursor-pointer transition-all ${currentScript === index ? 'bg-blue-100 border-l-4 border-blue-500 shadow-md scale-105' : 'hover:bg-gray-200'}`}>
-                      <div className="text-gray-600 text-xs mb-1">[{segment.start_time || `${Math.floor((segment.start || 0) / 60)}:${((segment.start || 0) % 60).toFixed(0).padStart(2, '0')}`} - {segment.end_time || `${Math.floor((segment.end || 0) / 60)}:${((segment.end || 0) % 60).toFixed(0).padStart(2, '0')}`}]</div>
-                      <div className="text-gray-900 font-medium text-sm segment-text">{segment.original_text}</div>
-
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900">📝 자막 스크립트</h3>
+                  {selectedSegments.length > 0 && (
+                    <div className="flex gap-2">
+                      <span className="text-sm bg-blue-100 text-blue-700 px-3 py-1 rounded-full font-medium">
+                        {selectedSegments.length}개 선택됨
+                      </span>
+                      <button
+                        onClick={() => setSelectedSegments([])}
+                        className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded hover:bg-gray-300"
+                      >
+                        선택 초기화
+                      </button>
                     </div>
-                  ))}
+                  )}
+                </div>
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
+                  <p className="text-xs text-blue-700">
+                    💡 <strong>통역한 부분을 체크박스로 선택하세요.</strong> 선택된 세그먼트들을 AI가 평가합니다.
+                  </p>
+                </div>
+                <div ref={scriptContainerRef} className="h-[28rem] overflow-y-auto border-2 border-gray-300 rounded-lg p-4 bg-gray-50 overscroll-contain">
+                  {segments.map((segment, index) => {
+                    const isSelected = selectedSegments.includes(index);
+                    return (
+                      <div 
+                        key={segment.id}
+                        className={`p-3 mb-2 rounded transition-all ${
+                          isSelected ? 'bg-blue-50 border-2 border-blue-400 shadow-md' :
+                          currentScript === index ? 'bg-yellow-100 border-l-4 border-yellow-500 shadow-md' : 
+                          'hover:bg-gray-200 border border-transparent'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2">
+                          {/* 체크박스 */}
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              if (isSelected) {
+                                setSelectedSegments(prev => prev.filter(i => i !== index));
+                              } else {
+                                setSelectedSegments(prev => [...prev, index].sort((a, b) => a - b));
+                              }
+                            }}
+                            className="mt-1 w-4 h-4 cursor-pointer accent-blue-600"
+                          />
+                          
+                          {/* 세그먼트 내용 */}
+                          <div 
+                            className="flex-1 cursor-pointer"
+                            onClick={() => { 
+                              setPracticeMode('listen'); 
+                              setPracticeSegmentIndex(index); 
+                              setCurrentScript(index); 
+                              setAccumulatedText(''); 
+                              setCurrentText(''); 
+                              setRecordingTime(0); 
+                              setEvaluationResult(null);
+                              if (player) { 
+                                const startTime = getTimeWithOffset(segment.start_time || segment.start_seconds); 
+                                setLastAutoDetectionEnabledTime(Date.now()); 
+                                player.seekTo(startTime); 
+                                player.playVideo() 
+                              } 
+                            }}
+                          >
+                            <div className="text-gray-600 text-xs mb-1">
+                              [{segment.start_time || `${Math.floor((segment.start_seconds || 0) / 60)}:${((segment.start_seconds || 0) % 60).toFixed(0).padStart(2, '0')}`} - {segment.end_time || `${Math.floor((segment.end_seconds || 0) / 60)}:${((segment.end_seconds || 0) % 60).toFixed(0).padStart(2, '0')}`}]
+                            </div>
+                            <div className="text-gray-900 font-medium text-sm segment-text">{segment.original_text}</div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
           </div>
         </div>
       </div>
+      
+      {/* 튜토리얼 */}
+      <Tour
+        steps={tourSteps}
+        visible={showTour}
+        onClose={handleTourClose}
+      />
     </div>
   )
 }

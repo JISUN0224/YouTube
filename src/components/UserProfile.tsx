@@ -12,7 +12,7 @@ export function UserProfile() {
       await logout()
       setShowDropdown(false)
     } catch (error) {
-      console.error('로그아웃 실패:', error)
+      // 에러 처리
     }
   }
 
@@ -47,7 +47,7 @@ export function UserProfile() {
               onClick={() => setShowDropdown(false)}
               className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
             >
-              내 즐겨찾기
+              ⭐ 즐겨찾기
             </button>
             <button
               onClick={handleLogout}
